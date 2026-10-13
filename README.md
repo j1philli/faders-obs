@@ -48,8 +48,8 @@ Cross-compiling from macOS or Linux for a quick check: `./scripts/cross-windows.
 → `build-win/faders.dll`; `scripts/ci/check-windows-dll.py` verifies its exports and imports.
 
 TeamCity runs `scripts/ci/teamcity-windows.ps1` (MSVC build + end-to-end test + packaging),
-`scripts/ci/teamcity-macos.sh` and `scripts/ci/teamcity-linux-cross.sh` (in `ubuntu:24.04`). CI (`.github/workflows/ci.yml`) builds both platforms with their native
-toolchains and runs the end-to-end test below on each, against `test/mock-hub.mjs`.
+`scripts/ci/teamcity-macos.sh` and `scripts/ci/teamcity-linux-cross.sh` (in `ubuntu:24.04`). CI runs on TeamCity (`scripts/ci/`): native builds on macOS and Windows agents run the
+end-to-end test below against `test/mock-hub.mjs`, plus a MinGW cross-build on Linux.
 
 ## Test without the OBS GUI
 
@@ -80,8 +80,7 @@ frame and each decoded layer correlates 0.97–0.997 with its own source and ≤
 
 - **Windows runtime is unverified:** the DLL cross-compiles, exports exactly the 8 functions
   libobs looks up, and every one of its 60 OBS imports exists in the real OBS 32.2.2 DLLs, but it
-  hasn't been loaded into OBS on a Windows machine yet. The CI workflow does that on a
-  windows-2025 runner once the repo is on GitHub.
+  has only run in libobs headlessly (CI), not yet clicked through in the OBS app on Windows.
 - **Linux:** needs a libcurl transport (`src/ws-curl.c`); everything else is shared.
 - **Intel Macs / universal build:** set `CMAKE_OSX_ARCHITECTURES="arm64;x86_64"` and build opus
   universal.
