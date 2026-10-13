@@ -4,7 +4,9 @@ Sends your **voice**, **game** and **music** as three separate layers to the Fad
 viewers can mix them. Your Twitch stream is not touched.
 
 - **Tools → Faders** opens the settings (OBS's own properties window, no custom UI code):
-  server, key, which mixer track is voice / game / music, "only send while streaming".
+  key, which mixer track is voice / game / music, "only send while streaming". The server
+  defaults to `wss://hub.faders.tv/ingest` (the key identifies the channel); it's editable under
+  *Advanced* for testing against another hub.
 - Taps OBS mixer tracks with `obs_add_raw_audio_callback` (default tracks 2/3/4). Assign
   sources in *Edit → Advanced Audio Properties*.
 - Opus 64 kbps, 20 ms frames, 500 ms chunks (`PROTOCOL.md`). ~190 kbps total upload,
@@ -26,12 +28,23 @@ Everything is shared C except the WebSocket transport (`src/ws.h`):
 | Output | `faders.plugin` bundle | `faders.dll` + `data/` |
 | libobs | links OBS.app frameworks | import libs generated from the release DLLs |
 
-## Build (macOS, Apple silicon)
+## Install
+
+Download the installer for your platform and run it, then restart OBS and open
+**Tools → Faders**:
+
+- **macOS 13+** (Apple silicon and Intel): `faders-obs-<version>-macos.pkg`. Installs for your
+  user into `~/Library/Application Support/obs-studio/plugins`.
+- **Windows 10/11 x64**: `faders-obs-<version>-windows.exe`. Installs into
+  `%ProgramData%\obs-studio\plugins\faders`; uninstall from Settings → Apps.
+
+## Build (macOS)
 
 ```sh
-./scripts/fetch-deps.sh                       # OBS.app 32.2.2, matching headers, SIMDe, static libopus
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
-./scripts/install-macos.sh                    # → ~/Library/Application Support/obs-studio/plugins
+./scripts/fetch-deps.sh     # OBS 32.2.2 (Apple + Intel releases), matching headers, SIMDe, static libopus
+./scripts/build-macos.sh    # universal build/faders.plugin (+ arm64 headless test host); FADERS_INTEL=0 for arm64 only
+./scripts/install-macos.sh  # → ~/Library/Application Support/obs-studio/plugins
+./scripts/package-macos.sh  # → faders-obs-<version>-macos.pkg (signs/notarizes when MACOS_* are set; see the script)
 ```
 
 ## Build (Windows x64, MSVC)
@@ -47,9 +60,14 @@ cmake -S . -B build -A x64; cmake --build build --config Release
 Cross-compiling from macOS or Linux for a quick check: `./scripts/cross-windows.sh` (MinGW-w64)
 → `build-win/faders.dll`; `scripts/ci/check-windows-dll.py` verifies its exports and imports.
 
-TeamCity runs `scripts/ci/teamcity-windows.ps1` (MSVC build + end-to-end test + packaging),
-`scripts/ci/teamcity-macos.sh` and `scripts/ci/teamcity-linux-cross.sh` (in `ubuntu:24.04`). CI runs on TeamCity (`scripts/ci/`): native builds on macOS and Windows agents run the
-end-to-end test below against `test/mock-hub.mjs`, plus a MinGW cross-build on Linux.
+Installer: `makensis -DVERSION=0.1.0 -DDLL=<path>/faders.dll -DOUTFILE=<path>/faders-obs-0.1.0-windows.exe installer/windows/faders.nsi`
+(NSIS 3, on Windows or Linux). The installer art in `installer/` is generated from the Faders
+brand kit.
+
+CI runs on TeamCity (`scripts/ci/`): `teamcity-macos.sh` and `teamcity-windows.ps1` build
+natively, run the end-to-end test below against `test/mock-hub.mjs` and package (zip + `.pkg`;
+zip + `.exe` when NSIS is on the Windows agent); `teamcity-linux-cross.sh` (in `ubuntu:24.04`)
+cross-builds with MinGW, checks the DLL statically and builds the `.exe` installer.
 
 ## Test without the OBS GUI
 
@@ -82,10 +100,11 @@ frame and each decoded layer correlates 0.97–0.997 with its own source and ≤
   libobs looks up, and every one of its 60 OBS imports exists in the real OBS 32.2.2 DLLs, but it
   has only run in libobs headlessly (CI), not yet clicked through in the OBS app on Windows.
 - **Linux:** needs a libcurl transport (`src/ws-curl.c`); everything else is shared.
-- **Intel Macs / universal build:** set `CMAKE_OSX_ARCHITECTURES="arm64;x86_64"` and build opus
-  universal.
-- **Distribution signing:** the build is ad-hoc signed. Shipping to other Macs needs a Developer
-  ID signature + notarization (Apple Developer Program, $99/yr) and an installer `.pkg`.
+- **Intel Macs:** the universal build links each architecture against its own OBS release, but
+  the x86_64 half hasn't been run yet (no Intel Mac / Rosetta in CI).
+- **Signing:** installers are unsigned. macOS needs a Developer ID + notarization (Apple
+  Developer Program, $99/yr; `package-macos.sh` does it once `MACOS_*` are set); Windows
+  SmartScreen warns about unsigned installers until they're code-signed.
 - **GUI check in real OBS:** the Tools menu + properties window haven't been clicked through in
   the OBS app yet (the headless test bypasses the frontend).
 

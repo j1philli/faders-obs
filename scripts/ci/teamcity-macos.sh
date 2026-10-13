@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-or-later
-# TeamCity (macOS agent): build faders.plugin, run the headless end-to-end test, package.
+# TeamCity (macOS agent): build faders.plugin (universal), run the headless end-to-end test,
+# package a zip and the .pkg installer (signed when the MACOS_* identities are set).
 # Agent needs: Xcode command line tools, git, node 22 (CMake is fetched if missing).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -24,8 +25,7 @@ cmake --version | head -1
 
 npm ci --no-audit --no-fund
 ./scripts/fetch-deps.sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
+./scripts/build-macos.sh # universal plugin (arm64 + x86_64) and the arm64 headless host
 
 node test/mock-hub.mjs --port "$PORT" > hub.log 2>&1 &
 HUB=$!
@@ -44,3 +44,4 @@ node test/plugin-listener.mjs --server "ws://127.0.0.1:$PORT" --channel ci_chann
 
 rm -f faders-obs-macos.zip
 (cd build && zip -qry ../faders-obs-macos.zip faders.plugin)
+./scripts/package-macos.sh

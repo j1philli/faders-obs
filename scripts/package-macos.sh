@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Packages build/faders.plugin as faders-obs-<version>-macos.pkg (current-user install into
+# ~/Library/Application Support/obs-studio/plugins). Run scripts/build-macos.sh first.
+#
+# Unsigned by default: macOS then asks the user to allow it in System Settings → Privacy &
+# Security. Release signing, when these are set (needs a paid Apple Developer account):
+#   MACOS_APP_IDENTITY        "Developer ID Application: …"  signs the plugin (hardened runtime)
+#   MACOS_INSTALLER_IDENTITY  "Developer ID Installer: …"    signs the .pkg
+#   MACOS_NOTARY_PROFILE      notarytool keychain profile    notarizes and staples the .pkg
+set -euo pipefail
+cd "$(dirname "$0")/.."
+VERSION="${FADERS_VERSION:-$(sed -n 's/^project(faders VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)}"
+OUT="faders-obs-$VERSION-macos.pkg"
+WORK=package/macos
+rm -rf "$WORK" && mkdir -p "$WORK/root" "$WORK/resources"
+
+# No extended attributes or resource forks: pkgbuild would ship them as ._ files.
+ditto --norsrc --noextattr --noqtn --noacl build/faders.plugin "$WORK/root/faders.plugin"
+if [ -n "${MACOS_APP_IDENTITY:-}" ]; then
+  codesign --force --timestamp --options runtime --sign "$MACOS_APP_IDENTITY" "$WORK/root/faders.plugin"
+fi
+
+# Keep the bundle where we put it (no "relocation" to a copy found elsewhere on disk).
+pkgbuild --analyze --root "$WORK/root" "$WORK/component.plist" >/dev/null
+plutil -replace 0.BundleIsRelocatable -bool NO "$WORK/component.plist"
+COPYFILE_DISABLE=1 pkgbuild --root "$WORK/root" --component-plist "$WORK/component.plist" --identifier tv.faders.obs-plugin \
+  --version "$VERSION" --install-location "/Library/Application Support/obs-studio/plugins" \
+  "$WORK/faders-component.pkg" >/dev/null
+
+# Retina-ready background: a multi-resolution TIFF from the 1x/2x PNGs.
+tiffutil -cathidpicheck installer/macos/bg.png installer/macos/bg@2x.png -out "$WORK/resources/bg.tiff" 2>/dev/null
+cp installer/macos/welcome.html installer/macos/conclusion.html "$WORK/resources/"
+sed "s/@VERSION@/$VERSION/" installer/macos/distribution.xml > "$WORK/distribution.xml"
+
+sign=()
+[ -n "${MACOS_INSTALLER_IDENTITY:-}" ] && sign=(--sign "$MACOS_INSTALLER_IDENTITY" --timestamp)
+productbuild --distribution "$WORK/distribution.xml" --resources "$WORK/resources" --package-path "$WORK" \
+  ${sign[@]+"${sign[@]}"} "$OUT" >/dev/null
+
+if [ -n "${MACOS_NOTARY_PROFILE:-}" ]; then
+  xcrun notarytool submit "$OUT" --keychain-profile "$MACOS_NOTARY_PROFILE" --wait
+  xcrun stapler staple "$OUT"
+fi
+echo "built $OUT ($([ ${#sign[@]} -gt 0 ] && echo signed || echo unsigned))"

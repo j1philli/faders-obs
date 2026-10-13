@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: GPL-2.0-or-later -->
+<!-- productbuild distribution for the Faders OBS plugin. Installs for the current user only,
+     into ~/Library/Application Support/obs-studio/plugins, where OBS looks for plugins. -->
+<installer-gui-script minSpecVersion="2">
+  <title>Faders for OBS</title>
+  <background file="bg.tiff" alignment="bottomleft" scaling="none" />
+  <background-darkAqua file="bg.tiff" alignment="bottomleft" scaling="none" />
+  <welcome file="welcome.html" mime-type="text/html" />
+  <conclusion file="conclusion.html" mime-type="text/html" />
+  <domains enable_anywhere="false" enable_currentUserHome="true" enable_localSystem="false" />
+  <options customize="never" require-scripts="false" hostArchitectures="arm64,x86_64" />
+  <volume-check>
+    <allowed-os-versions><os-version min="13.0" /></allowed-os-versions>
+  </volume-check>
+  <choices-outline>
+    <line choice="tv.faders.obs-plugin" />
+  </choices-outline>
+  <choice id="tv.faders.obs-plugin" title="Faders for OBS" visible="false">
+    <pkg-ref id="tv.faders.obs-plugin" />
+  </choice>
+  <pkg-ref id="tv.faders.obs-plugin" version="@VERSION@" onConclusion="none">faders-component.pkg</pkg-ref>
+</installer-gui-script>

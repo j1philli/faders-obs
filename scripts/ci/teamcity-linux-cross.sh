@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-or-later
 # TeamCity (Linux agent, Docker ubuntu:24.04): cross-compile faders.dll with MinGW-w64 and check
-# it statically (exports + every OBS import exists in the release DLLs). Can't run it here:
-# the runtime test happens on the Windows agent.
+# it statically (exports + every OBS import exists in the release DLLs), and build the NSIS
+# installer. Can't run it here: the runtime test happens on the Windows agent.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 export DEBIAN_FRONTEND=noninteractive
 if ! command -v x86_64-w64-mingw32-gcc >/dev/null; then
   apt-get update -qq
-  apt-get install -y -qq --no-install-recommends mingw-w64 cmake make llvm git curl unzip ca-certificates python3 >/dev/null
+  apt-get install -y -qq --no-install-recommends mingw-w64 cmake make llvm git curl unzip ca-certificates python3 nsis >/dev/null
 fi
 ./scripts/cross-windows.sh
 python3 scripts/ci/check-windows-dll.py build-win/faders.dll .deps/win/lib
@@ -20,3 +20,7 @@ with zipfile.ZipFile("faders-obs-windows-cross.zip", "w", zipfile.ZIP_DEFLATED) 
         if p.is_file():
             z.write(p, f"faders/data/{p.relative_to('data')}")
 PY
+
+VERSION="${FADERS_VERSION:-$(sed -n 's/^project(faders VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)}"
+makensis -V2 -DVERSION="$VERSION" -DDLL="$PWD/build-win/faders.dll" -DOUTFILE="$PWD/faders-obs-$VERSION-windows.exe" installer/windows/faders.nsi
+echo "built faders-obs-$VERSION-windows.exe (unsigned)"

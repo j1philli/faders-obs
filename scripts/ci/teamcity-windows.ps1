@@ -50,3 +50,13 @@ New-Item -ItemType Directory -Force "$stage\bin\64bit", "$stage\data" | Out-Null
 Copy-Item build\Release\faders.dll "$stage\bin\64bit\"
 Copy-Item data\* "$stage\data" -Recurse
 Compress-Archive -Path $stage -DestinationPath (Join-Path $root "faders-obs-windows.zip") -Force
+
+# Installer from the DLL that just passed the runtime test, when NSIS is on the agent
+# (https://nsis.sourceforge.io; the Linux cross-build also produces one from the MinGW DLL).
+$nsis = @((Get-Command makensis -ErrorAction SilentlyContinue).Source, "${env:ProgramFiles(x86)}\NSIS\makensis.exe") | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+if ($nsis) {
+  $version = (Select-String -Path CMakeLists.txt -Pattern 'project\(faders VERSION ([0-9.]+)').Matches[0].Groups[1].Value
+  & $nsis -V2 "-DVERSION=$version" "-DDLL=$root\build\Release\faders.dll" "-DOUTFILE=$root\faders-obs-$version-windows.exe" installer\windows\faders.nsi; Check "makensis"
+} else {
+  Write-Host "##teamcity[message text='NSIS not installed on this agent: skipped the .exe installer' status='WARNING']"
+}

@@ -31,6 +31,9 @@ MODULE_EXPORT const char *obs_module_description(void)
 
 #define SOURCE_ID "faders_uplink"
 #define PORTAL_URL "https://faders.tv/portal/"
+// Production hub. The key alone identifies the channel, so streamers only paste their key; the
+// server stays editable (Advanced) for testing against another hub.
+#define DEFAULT_SERVER "wss://hub.faders.tv/ingest"
 
 static obs_source_t *settings_source; // private, never shown in a scene
 static fdr_uplink_t *uplink;
@@ -115,6 +118,7 @@ static void src_destroy(void *data)
 static void src_defaults(obs_data_t *s)
 {
 	obs_data_set_default_bool(s, "enabled", true);
+	obs_data_set_default_string(s, "server", DEFAULT_SERVER);
 	obs_data_set_default_bool(s, "only_live", true);
 	obs_data_set_default_int(s, "track_voice", 2);
 	obs_data_set_default_int(s, "track_game", 3);
@@ -143,9 +147,8 @@ static obs_properties_t *src_properties(void *data)
 	dstr_free(&status);
 
 	obs_properties_add_bool(props, "enabled", "Send Faders layers");
-	obs_properties_add_text(props, "server", "Server", OBS_TEXT_DEFAULT);
 	obs_properties_add_text(props, "key", "Key", OBS_TEXT_PASSWORD);
-	obs_property_t *portal = obs_properties_add_button(props, "portal", "Get a server and key from the Faders portal", NULL);
+	obs_property_t *portal = obs_properties_add_button(props, "portal", "Get your key from the Faders portal", NULL);
 	obs_property_button_set_type(portal, OBS_BUTTON_URL);
 	obs_property_button_set_url(portal, PORTAL_URL);
 
@@ -156,6 +159,10 @@ static obs_properties_t *src_properties(void *data)
 	obs_properties_add_group(props, "tracks", "Audio tracks (assign sources in Edit → Advanced Audio Properties)", OBS_GROUP_NORMAL, tracks);
 
 	obs_properties_add_bool(props, "only_live", "Only send while streaming");
+
+	obs_properties_t *advanced = obs_properties_create();
+	obs_properties_add_text(advanced, "server", "Server", OBS_TEXT_DEFAULT);
+	obs_properties_add_group(props, "advanced", "Advanced", OBS_GROUP_NORMAL, advanced);
 	return props;
 }
 

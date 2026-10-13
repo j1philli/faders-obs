@@ -6,3 +6,6 @@ node_modules/
 .DS_Store
 faders-obs-*.zip
 package/
+build-x86_64/
+faders-obs-*.pkg
+faders-obs-*.exe
