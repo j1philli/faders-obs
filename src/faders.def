@@ -1,0 +1,12 @@
+; SPDX-License-Identifier: GPL-2.0-or-later
+; Exports libobs looks up with os_dlsym (libobs/obs-module.c). Used by the MinGW build so the
+; DLL doesn't export Opus internals; MSVC exports only the MODULE_EXPORT symbols anyway.
+EXPORTS
+  obs_module_load
+  obs_module_unload
+  obs_module_set_pointer
+  obs_module_ver
+  obs_module_set_locale
+  obs_module_free_locale
+  obs_module_get_string
+  obs_module_description

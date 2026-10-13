@@ -1,0 +1,82 @@
+# Builds the Faders OBS plugin on macOS and Windows (MSVC) and runs the headless end-to-end test:
+# real libobs plays three WAVs into tracks 2/3/4 → plugin → mock hub → listener checks the chunks.
+name: ci
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm ci
+
+      - name: Dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: ./scripts/fetch-deps.sh
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/fetch-deps-windows.ps1
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release
+
+      - name: Start mock hub
+        run: |
+          node test/mock-hub.mjs --port 8787 > hub.log 2>&1 &
+          for i in $(seq 1 30); do curl -s localhost:8787/health | grep -q ok && break; sleep 1; done
+
+      - name: End-to-end (plugin → hub → listener)
+        run: |
+          REPO="$PWD"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # libobs on Windows finds its data at ../../data/libobs relative to the working
+            # directory and loads libobs-d3d11 from it, so run from OBS's own bin\64bit.
+            BIN=.deps/win/obs/bin/64bit
+            cp build/Release/faders-headless.exe "$BIN/"
+            cd "$BIN"
+            HOST=./faders-headless.exe
+            MEDIA="$(cygpath -w "$REPO/test/media")"
+          else
+            HOST=build/faders-headless
+            MEDIA="$REPO/test/media"
+          fi
+
+          # A wrong key must be rejected and reported, not retried in a tight loop.
+          "$HOST" ws://127.0.0.1:8787/ingest/ci_channel wrong-key "$MEDIA/voice.wav" "$MEDIA/game.wav" "$MEDIA/music.wav" 5 > "$REPO/host-badkey.log" 2>&1 || true
+          grep -q "HTTP 401" "$REPO/host-badkey.log"
+
+          "$HOST" ws://127.0.0.1:8787/ingest/ci_channel dev-token "$MEDIA/voice.wav" "$MEDIA/game.wav" "$MEDIA/music.wav" 40 > "$REPO/host.log" 2>&1 &
+          cd "$REPO"
+          sleep 6
+          node test/plugin-listener.mjs --server ws://127.0.0.1:8787 --channel ci_channel --seconds 20
+
+      - name: Logs
+        if: always()
+        run: tail -n 60 host-badkey.log host.log hub.log 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: faders-obs-${{ runner.os }}
+          if-no-files-found: ignore
+          path: |
+            build/faders.plugin
+            build/Release/faders.dll
+            build/data

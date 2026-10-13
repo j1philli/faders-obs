@@ -1,0 +1,382 @@
+/*
+ * Faders OBS plugin
+ * Copyright (C) 2026 Josh Phillips
+ *
+ * This program is free software; you can redistribute it and/or modify it under the terms of
+ * the GNU General Public License as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+#include "uplink.h"
+#include "ws.h"
+
+#include <obs-module.h>
+#include <util/platform.h>
+#include <util/threading.h>
+#include <util/bmem.h>
+#include <util/dstr.h>
+#include <opus/opus.h>
+#include <pthread.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#define SAMPLE_RATE 48000
+#define FRAME_MS 20
+#define FRAME_SAMPLES (SAMPLE_RATE * FRAME_MS / 1000) // 960
+#define CHUNK_MS 500
+#define FRAMES_PER_CHUNK (CHUNK_MS / FRAME_MS) // 25
+#define STEMS 3
+#define OPUS_BITRATE 64000
+#define MAX_PACKET 1500
+#define BACKLOG_CHUNKS (60000 / CHUNK_MS) // 60 s, replayed when a listener arrives
+#define RING_SAMPLES (SAMPLE_RATE * 4)    // 4 s per stem; overflow drops the oldest audio
+#define HEADER_BYTES 16
+#define PROTOCOL_VERSION 1
+
+struct ring {
+	float buf[RING_SAMPLES];
+	size_t head; // read position
+	size_t len;
+};
+
+struct chunk {
+	uint32_t seq;
+	uint8_t *data;
+	size_t len;
+};
+
+struct tap {
+	struct fdr_uplink *u;
+	int stem;
+	size_t mix_idx;
+};
+
+struct fdr_uplink {
+	char *server;
+	char *key;
+	struct tap taps[STEMS];
+
+	pthread_mutex_t mu; // guards rings, start_ts, ws state, status
+	struct ring rings[STEMS];
+	uint64_t start_ts; // first audio timestamp all stems accept, so they start aligned
+
+	OpusEncoder *enc[STEMS];
+	// The chunk being assembled: per stem, FRAMES_PER_CHUNK Opus packets.
+	uint8_t packets[STEMS][FRAMES_PER_CHUNK][MAX_PACKET];
+	int16_t packet_len[STEMS][FRAMES_PER_CHUNK];
+	int frames_in_chunk;
+
+	uint32_t seq0;   // stream clock: wall-clock based so a restarted OBS continues it
+	uint32_t chunk_n;
+	struct chunk backlog[BACKLOG_CHUNKS];
+	int64_t last_sent_seq;
+	uint32_t conn_gen; // bumped on every (re)connect; stale flushes don't overwrite progress
+
+	fdr_ws_t *ws;
+	bool connected;
+	int listeners;
+	uint64_t next_connect_ns;
+	uint64_t backoff_ns;
+
+	uint64_t window_start_ns;
+	size_t window_bytes;
+	fdr_uplink_status status;
+
+	pthread_t thread;
+	os_event_t *stop_event;
+};
+
+// ── Audio thread: copy mixer output into per-stem rings ─────────────────────────────────
+
+static void ring_push(struct ring *r, const float *src, size_t n)
+{
+	for (size_t i = 0; i < n; i++) {
+		if (r->len == RING_SAMPLES) { // full: drop the oldest sample
+			r->head = (r->head + 1) % RING_SAMPLES;
+			r->len--;
+		}
+		r->buf[(r->head + r->len) % RING_SAMPLES] = src[i];
+		r->len++;
+	}
+}
+
+static void ring_pop(struct ring *r, float *dst, size_t n)
+{
+	for (size_t i = 0; i < n; i++)
+		dst[i] = r->buf[(r->head + i) % RING_SAMPLES];
+	r->head = (r->head + n) % RING_SAMPLES;
+	r->len -= n;
+}
+
+static void on_audio(void *param, size_t mix_idx, struct audio_data *data)
+{
+	UNUSED_PARAMETER(mix_idx);
+	struct tap *t = param;
+	struct fdr_uplink *u = t->u;
+	pthread_mutex_lock(&u->mu);
+	// OBS delivers every mix for the same tick with the same timestamp. The first callback
+	// picks a start a little in the future; every stem drops audio before it, so all three
+	// rings begin on the same sample even though the callbacks were registered one by one.
+	if (!u->start_ts)
+		u->start_ts = data->timestamp + 50000000ULL;
+	if (data->timestamp >= u->start_ts)
+		ring_push(&u->rings[t->stem], (const float *)data->data[0], data->frames);
+	pthread_mutex_unlock(&u->mu);
+}
+
+// ── Network ─────────────────────────────────────────────────────────────────────────────
+
+static void set_error(struct fdr_uplink *u, const char *msg)
+{
+	snprintf(u->status.last_error, sizeof(u->status.last_error), "%s", msg);
+}
+
+static void on_open(void *param)
+{
+	struct fdr_uplink *u = param;
+	pthread_mutex_lock(&u->mu);
+	u->connected = true;
+	u->backoff_ns = 0;
+	u->last_sent_seq = -1; // the hub may have restarted: offer everything we still hold
+	u->conn_gen++;
+	u->status.last_error[0] = 0;
+	pthread_mutex_unlock(&u->mu);
+	blog(LOG_INFO, "[faders] connected to %s", u->server);
+}
+
+static void on_text(void *param, const char *text)
+{
+	struct fdr_uplink *u = param;
+	// The hub sends {"type":"listeners","n":N}. Tiny, fixed shape: no JSON parser needed.
+	if (!strstr(text, "\"listeners\""))
+		return;
+	const char *n = strstr(text, "\"n\":");
+	if (!n)
+		return;
+	int listeners = atoi(n + 4);
+	pthread_mutex_lock(&u->mu);
+	if ((u->listeners == 0) != (listeners == 0))
+		blog(LOG_INFO, "[faders] %d listener(s): %s uplink", listeners, listeners ? "resuming" : "pausing");
+	u->listeners = listeners;
+	pthread_mutex_unlock(&u->mu);
+}
+
+static void on_close(void *param, const char *reason)
+{
+	struct fdr_uplink *u = param;
+	pthread_mutex_lock(&u->mu);
+	u->connected = false;
+	u->listeners = 0;
+	set_error(u, reason);
+	pthread_mutex_unlock(&u->mu);
+	blog(LOG_WARNING, "[faders] disconnected: %s", reason);
+}
+
+// Worker thread only. Sends backlog chunks the hub hasn't seen, if anyone is listening.
+static void flush(struct fdr_uplink *u)
+{
+	pthread_mutex_lock(&u->mu);
+	bool can_send = u->ws && u->connected && u->listeners > 0;
+	int64_t last_sent = u->last_sent_seq; // on_open resets it from the network thread
+	uint32_t gen = u->conn_gen;
+	pthread_mutex_unlock(&u->mu);
+	if (!can_send)
+		return;
+	// Oldest → newest.
+	for (uint32_t i = 0; i < BACKLOG_CHUNKS; i++) {
+		struct chunk *c = &u->backlog[(u->chunk_n + i) % BACKLOG_CHUNKS];
+		if (!c->data || (int64_t)c->seq <= last_sent)
+			continue;
+		if (!fdr_ws_send_binary(u->ws, c->data, c->len))
+			break; // not open / backed up: retry next tick
+		last_sent = c->seq;
+		u->window_bytes += c->len;
+		u->status.chunks_sent++;
+	}
+	pthread_mutex_lock(&u->mu);
+	if (u->conn_gen == gen)
+		u->last_sent_seq = last_sent;
+	pthread_mutex_unlock(&u->mu);
+}
+
+static void maintain_connection(struct fdr_uplink *u, uint64_t now)
+{
+	pthread_mutex_lock(&u->mu);
+	bool dead = u->ws && !u->connected && u->status.last_error[0];
+	pthread_mutex_unlock(&u->mu);
+	if (dead) {
+		fdr_ws_destroy(u->ws);
+		u->ws = NULL;
+		// Back off 1 s → 30 s so a wrong key doesn't hammer the hub.
+		u->backoff_ns = u->backoff_ns ? (u->backoff_ns * 2 > 30000000000ULL ? 30000000000ULL : u->backoff_ns * 2) : 1000000000ULL;
+		u->next_connect_ns = now + u->backoff_ns;
+	}
+	if (!u->ws && now >= u->next_connect_ns) {
+		static const fdr_ws_callbacks cb = {on_open, on_text, on_close};
+		pthread_mutex_lock(&u->mu);
+		u->status.last_error[0] = 0;
+		pthread_mutex_unlock(&u->mu);
+		u->ws = fdr_ws_connect(u->server, u->key, &cb, u);
+		if (!u->ws) {
+			pthread_mutex_lock(&u->mu);
+			set_error(u, "invalid server URL");
+			pthread_mutex_unlock(&u->mu);
+			u->next_connect_ns = now + 5000000000ULL;
+		}
+	}
+}
+
+// ── Encoding ────────────────────────────────────────────────────────────────────────────
+
+static void write_u16(uint8_t *p, uint16_t v) { p[0] = v & 0xff; p[1] = v >> 8; }
+static void write_u32(uint8_t *p, uint32_t v) { for (int i = 0; i < 4; i++) p[i] = (v >> (8 * i)) & 0xff; }
+static void write_f64(uint8_t *p, double v) { memcpy(p, &v, 8); } // little-endian hosts only (arm64/x86)
+
+static void finish_chunk(struct fdr_uplink *u)
+{
+	size_t size = HEADER_BYTES;
+	for (int s = 0; s < STEMS; s++) {
+		size += 3;
+		for (int f = 0; f < FRAMES_PER_CHUNK; f++)
+			size += 2 + u->packet_len[s][f];
+	}
+	uint8_t *out = bmalloc(size);
+	uint32_t seq = u->seq0 + u->chunk_n;
+	out[0] = PROTOCOL_VERSION;
+	out[1] = STEMS;
+	write_u32(out + 2, seq);
+	write_f64(out + 6, (double)seq * CHUNK_MS);
+	write_u16(out + 14, FRAME_MS);
+	size_t off = HEADER_BYTES;
+	for (int s = 0; s < STEMS; s++) {
+		out[off] = (uint8_t)s;
+		write_u16(out + off + 1, FRAMES_PER_CHUNK);
+		off += 3;
+		for (int f = 0; f < FRAMES_PER_CHUNK; f++) {
+			write_u16(out + off, (uint16_t)u->packet_len[s][f]);
+			memcpy(out + off + 2, u->packets[s][f], u->packet_len[s][f]);
+			off += 2 + u->packet_len[s][f];
+		}
+	}
+	struct chunk *slot = &u->backlog[u->chunk_n % BACKLOG_CHUNKS];
+	bfree(slot->data);
+	*slot = (struct chunk){seq, out, size};
+	u->chunk_n++;
+	u->frames_in_chunk = 0;
+}
+
+// Encode every complete 20 ms frame that all three stems have.
+static void encode_ready(struct fdr_uplink *u)
+{
+	float pcm[STEMS][FRAME_SAMPLES];
+	for (;;) {
+		pthread_mutex_lock(&u->mu);
+		bool ready = true;
+		for (int s = 0; s < STEMS; s++)
+			ready = ready && u->rings[s].len >= FRAME_SAMPLES;
+		if (ready)
+			for (int s = 0; s < STEMS; s++)
+				ring_pop(&u->rings[s], pcm[s], FRAME_SAMPLES);
+		pthread_mutex_unlock(&u->mu);
+		if (!ready)
+			return;
+		int f = u->frames_in_chunk;
+		for (int s = 0; s < STEMS; s++) {
+			int n = opus_encode_float(u->enc[s], pcm[s], FRAME_SAMPLES, u->packets[s][f], MAX_PACKET);
+			u->packet_len[s][f] = (int16_t)(n > 0 ? n : 0);
+		}
+		if (++u->frames_in_chunk == FRAMES_PER_CHUNK)
+			finish_chunk(u);
+	}
+}
+
+static void *worker(void *param)
+{
+	struct fdr_uplink *u = param;
+	os_set_thread_name("faders-uplink");
+	while (os_event_timedwait(u->stop_event, 10) == ETIMEDOUT) {
+		uint64_t now = os_gettime_ns();
+		encode_ready(u);
+		maintain_connection(u, now);
+		flush(u);
+		if (now - u->window_start_ns >= 5000000000ULL) {
+			pthread_mutex_lock(&u->mu);
+			u->status.uplink_kbps = (int)(u->window_bytes * 8 * 1000000ULL / (now - u->window_start_ns));
+			pthread_mutex_unlock(&u->mu);
+			u->window_bytes = 0;
+			u->window_start_ns = now;
+		}
+	}
+	return NULL;
+}
+
+// ── Lifecycle ───────────────────────────────────────────────────────────────────────────
+
+fdr_uplink_t *fdr_uplink_start(const fdr_uplink_config *cfg)
+{
+	if (!cfg->server || !*cfg->server || !cfg->key || !*cfg->key)
+		return NULL;
+	struct fdr_uplink *u = bzalloc(sizeof(*u));
+	u->server = bstrdup(cfg->server);
+	u->key = bstrdup(cfg->key);
+	u->last_sent_seq = -1;
+	u->seq0 = (uint32_t)((uint64_t)time(NULL) * 1000 / CHUNK_MS);
+	u->window_start_ns = os_gettime_ns();
+	pthread_mutex_init(&u->mu, NULL);
+	os_event_init(&u->stop_event, OS_EVENT_TYPE_MANUAL);
+
+	for (int s = 0; s < STEMS; s++) {
+		int err;
+		u->enc[s] = opus_encoder_create(SAMPLE_RATE, 1, OPUS_APPLICATION_AUDIO, &err);
+		opus_encoder_ctl(u->enc[s], OPUS_SET_BITRATE(OPUS_BITRATE));
+		opus_encoder_ctl(u->enc[s], OPUS_SET_COMPLEXITY(8));
+	}
+
+	// Mono float at 48 kHz, regardless of the OBS output format.
+	struct audio_convert_info conv = {.samples_per_sec = SAMPLE_RATE, .format = AUDIO_FORMAT_FLOAT, .speakers = SPEAKERS_MONO};
+	for (int s = 0; s < STEMS; s++) {
+		int track = cfg->tracks[s] < 1 || cfg->tracks[s] > 6 ? s + 2 : cfg->tracks[s];
+		u->taps[s] = (struct tap){u, s, (size_t)(track - 1)};
+		obs_add_raw_audio_callback(u->taps[s].mix_idx, &conv, on_audio, &u->taps[s]);
+	}
+	u->status.running = true;
+	pthread_create(&u->thread, NULL, worker, u);
+	blog(LOG_INFO, "[faders] uplink started: tracks voice=%d game=%d music=%d → %s", (int)u->taps[0].mix_idx + 1, (int)u->taps[1].mix_idx + 1, (int)u->taps[2].mix_idx + 1, u->server);
+	return u;
+}
+
+void fdr_uplink_stop(fdr_uplink_t *u)
+{
+	if (!u)
+		return;
+	for (int s = 0; s < STEMS; s++)
+		obs_remove_raw_audio_callback(u->taps[s].mix_idx, on_audio, &u->taps[s]);
+	os_event_signal(u->stop_event);
+	pthread_join(u->thread, NULL);
+	fdr_ws_destroy(u->ws);
+	for (int s = 0; s < STEMS; s++)
+		opus_encoder_destroy(u->enc[s]);
+	for (int i = 0; i < BACKLOG_CHUNKS; i++)
+		bfree(u->backlog[i].data);
+	os_event_destroy(u->stop_event);
+	pthread_mutex_destroy(&u->mu);
+	bfree(u->server);
+	bfree(u->key);
+	bfree(u);
+	blog(LOG_INFO, "[faders] uplink stopped");
+}
+
+void fdr_uplink_get_status(fdr_uplink_t *u, fdr_uplink_status *out)
+{
+	if (!u) {
+		memset(out, 0, sizeof(*out));
+		return;
+	}
+	pthread_mutex_lock(&u->mu);
+	*out = u->status;
+	out->connected = u->connected;
+	out->listeners = u->listeners;
+	pthread_mutex_unlock(&u->mu);
+}
