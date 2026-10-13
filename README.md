@@ -44,8 +44,11 @@ cmake -S . -B build -A x64; cmake --build build --config Release
 .\scripts\install-windows.ps1                 # (as admin) → %ProgramData%\obs-studio\plugins\faders
 ```
 
-Cross-compiling from macOS for a quick check: `./scripts/cross-windows.sh` (MinGW-w64) →
-`build-win/faders.dll`. CI (`.github/workflows/ci.yml`) builds both platforms with their native
+Cross-compiling from macOS or Linux for a quick check: `./scripts/cross-windows.sh` (MinGW-w64)
+→ `build-win/faders.dll`; `scripts/ci/check-windows-dll.py` verifies its exports and imports.
+
+TeamCity runs `scripts/ci/teamcity-windows.ps1` (MSVC build + end-to-end test + packaging),
+`scripts/ci/teamcity-macos.sh` and `scripts/ci/teamcity-linux-cross.sh` (in `ubuntu:24.04`). CI (`.github/workflows/ci.yml`) builds both platforms with their native
 toolchains and runs the end-to-end test below on each, against `test/mock-hub.mjs`.
 
 ## Test without the OBS GUI
