@@ -18,7 +18,7 @@ mkdir -p .deps
 [ -d .deps/simde ] || git clone -q --depth 1 --branch v0.8.2 https://github.com/simd-everywhere/simde.git .deps/simde
 sha256() { if command -v sha256sum >/dev/null; then sha256sum -c -; else shasum -a 256 -c -; fi; }
 pinned() { # <checkout> <commit>
-  [ "$(git -C "$1" rev-parse HEAD)" = "$2" ] || { echo "$1 is not at pinned commit $2" >&2; exit 1; }
+  [ "$(git -c safe.directory="*" -C "$1" rev-parse HEAD)" = "$2" ] || { echo "$1 is not at pinned commit $2" >&2; exit 1; }
 }
 pinned .deps/obs-studio-src "$OBS_COMMIT"
 pinned .deps/simde "$SIMDE_COMMIT"

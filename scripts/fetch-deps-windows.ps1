@@ -32,7 +32,7 @@ foreach ($dll in "obs", "obs-frontend-api", "w32-pthreads") {
 if (-not (Test-Path obs-studio-src)) { git clone --depth 1 --branch $ObsVersion https://github.com/obsproject/obs-studio.git obs-studio-src }
 if (-not (Test-Path simde)) { git clone --depth 1 --branch v0.8.2 https://github.com/simd-everywhere/simde.git simde }
 foreach ($pin in @(@("obs-studio-src", $ObsCommit), @("simde", $SimdeCommit))) {
-  if ((git -C $pin[0] rev-parse HEAD) -ne $pin[1]) { throw "$($pin[0]) is not at pinned commit $($pin[1])" }
+  if ((git -c safe.directory="*" -C $pin[0] rev-parse HEAD) -ne $pin[1]) { throw "$($pin[0]) is not at pinned commit $($pin[1])" }
 }
 
 if (-not (Test-Path win\opus\lib\opus.lib)) {

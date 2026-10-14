@@ -32,7 +32,7 @@ fetch_obs Apple OBS.app "$OBS_APPLE_SHA256"
 [ -d obs-studio-src ] || git clone --depth 1 --branch "$OBS_VERSION" https://github.com/obsproject/obs-studio.git obs-studio-src
 [ -d simde ] || git clone --depth 1 --branch v0.8.2 https://github.com/simd-everywhere/simde.git simde
 pinned() { # <checkout> <commit>
-  [ "$(git -C "$1" rev-parse HEAD)" = "$2" ] || { echo "$1 is not at pinned commit $2" >&2; exit 1; }
+  [ "$(git -c safe.directory="*" -C "$1" rev-parse HEAD)" = "$2" ] || { echo "$1 is not at pinned commit $2" >&2; exit 1; }
 }
 pinned obs-studio-src "$OBS_COMMIT"
 pinned simde "$SIMDE_COMMIT"
