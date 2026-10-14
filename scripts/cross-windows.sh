@@ -4,6 +4,11 @@
 # releases are built with MSVC in CI). Needs: mingw-w64, llvm (llvm-readobj), cmake.
 set -euo pipefail
 OBS_VERSION="${OBS_VERSION:-32.2.2}"
+# Every download is pinned: release files by SHA-256 (GitHub's published asset digests), source
+# checkouts by commit. Overriding OBS_VERSION means overriding the matching pins too.
+OBS_COMMIT="${OBS_COMMIT:-ba2f32bdf791005443988a4955e963663e16b1ed}"
+SIMDE_COMMIT="71fd833d9666141edcd1d3c109a80e228303d8d7"
+OBS_WIN_SHA256="${OBS_WIN_SHA256:-4d6e40e3ab155f56b30de517380566a206d74b63cdf5ad49aa596924768f97e1}"
 OPUS_VERSION="1.5.2"
 OPUS_SHA256="65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1"
 READOBJ="${READOBJ:-$(command -v llvm-readobj || echo /opt/homebrew/opt/llvm/bin/llvm-readobj)}"
@@ -12,10 +17,16 @@ mkdir -p .deps
 [ -d .deps/obs-studio-src ] || git clone -q --depth 1 --branch "$OBS_VERSION" https://github.com/obsproject/obs-studio.git .deps/obs-studio-src
 [ -d .deps/simde ] || git clone -q --depth 1 --branch v0.8.2 https://github.com/simd-everywhere/simde.git .deps/simde
 sha256() { if command -v sha256sum >/dev/null; then sha256sum -c -; else shasum -a 256 -c -; fi; }
+pinned() { # <checkout> <commit>
+  [ "$(git -C "$1" rev-parse HEAD)" = "$2" ] || { echo "$1 is not at pinned commit $2" >&2; exit 1; }
+}
+pinned .deps/obs-studio-src "$OBS_COMMIT"
+pinned .deps/simde "$SIMDE_COMMIT"
 mkdir -p .deps/win/lib && cd .deps/win
 
 if [ ! -f obs/bin/64bit/obs.dll ]; then
   curl -fSL -o obs-win.zip "https://github.com/obsproject/obs-studio/releases/download/${OBS_VERSION}/OBS-Studio-${OBS_VERSION}-Windows-x64.zip"
+  echo "${OBS_WIN_SHA256}  obs-win.zip" | sha256
   unzip -q -o obs-win.zip 'bin/64bit/obs.dll' 'bin/64bit/obs-frontend-api.dll' 'bin/64bit/w32-pthreads.dll' -d obs
   rm obs-win.zip
 fi

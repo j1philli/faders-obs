@@ -7,23 +7,35 @@
 # in OBS-x86_64.app / opus-x86_64, for the universal plugin (scripts/build-macos.sh).
 set -euo pipefail
 OBS_VERSION="${OBS_VERSION:-32.2.2}"
+# Every download is pinned: release files by SHA-256 (GitHub's published asset digests), source
+# checkouts by commit. Overriding OBS_VERSION means overriding the matching pins too.
+OBS_COMMIT="${OBS_COMMIT:-ba2f32bdf791005443988a4955e963663e16b1ed}"
+SIMDE_COMMIT="71fd833d9666141edcd1d3c109a80e228303d8d7"
+OBS_APPLE_SHA256="${OBS_APPLE_SHA256:-920d6f26703d2df6e4085bd3c1cbed30488325084136c7a6e9e37021fbd6aaf7}"
+OBS_INTEL_SHA256="${OBS_INTEL_SHA256:-f8d8afe3dffdc86efa0698c02ff0c997866bac3e6208ddaf56d37108baacf197}"
 OPUS_VERSION="1.5.2"
 OPUS_SHA256="65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1"
 cd "$(dirname "$0")/.."
 mkdir -p .deps && cd .deps
 
-fetch_obs() { # <dmg flavour> <destination>
+fetch_obs() { # <dmg flavour> <destination> <sha256>
   [ -d "$2" ] && return
   curl -fSL -o obs.dmg "https://github.com/obsproject/obs-studio/releases/download/${OBS_VERSION}/OBS-Studio-${OBS_VERSION}-macOS-$1.dmg"
+  echo "$3  obs.dmg" | shasum -a 256 -c -
   mnt=$(hdiutil attach -nobrowse -readonly obs.dmg | tail -1 | awk -F'\t' '{print $NF}')
   cp -R "$mnt/OBS.app" "$2"
   hdiutil detach "$mnt" >/dev/null
   rm obs.dmg
 }
-fetch_obs Apple OBS.app
-[ "${FADERS_INTEL:-1}" = 1 ] && fetch_obs Intel OBS-x86_64.app
+fetch_obs Apple OBS.app "$OBS_APPLE_SHA256"
+[ "${FADERS_INTEL:-1}" = 1 ] && fetch_obs Intel OBS-x86_64.app "$OBS_INTEL_SHA256"
 [ -d obs-studio-src ] || git clone --depth 1 --branch "$OBS_VERSION" https://github.com/obsproject/obs-studio.git obs-studio-src
 [ -d simde ] || git clone --depth 1 --branch v0.8.2 https://github.com/simd-everywhere/simde.git simde
+pinned() { # <checkout> <commit>
+  [ "$(git -C "$1" rev-parse HEAD)" = "$2" ] || { echo "$1 is not at pinned commit $2" >&2; exit 1; }
+}
+pinned obs-studio-src "$OBS_COMMIT"
+pinned simde "$SIMDE_COMMIT"
 
 build_opus() { # <arch> <prefix>
   [ -f "$2/lib/libopus.a" ] && return
