@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-or-later
-# Cross-compiles the Windows x64 plugin from macOS/Linux with MinGW-w64 (dev verification —
-# releases are built with MSVC in CI). Needs: mingw-w64, llvm (llvm-readobj), cmake.
+# Cross-compiles the Windows x64 plugin from macOS/Linux with MinGW-w64. Releases are built this
+# way on the Linux CI agent. Needs: mingw-w64, llvm (llvm-readobj), cmake.
 set -euo pipefail
 OBS_VERSION="${OBS_VERSION:-32.2.2}"
 # Every download is pinned: release files by SHA-256 (GitHub's published asset digests), source

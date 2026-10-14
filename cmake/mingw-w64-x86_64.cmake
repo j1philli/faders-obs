@@ -1,5 +1,5 @@
 # Cross-compile toolchain for Windows x64 from macOS/Linux (dev verification).
-# Release builds use MSVC on Windows; see .github/workflows/obs-plugin.yml.
+# Release builds use this toolchain on the Linux CI agent (scripts/ci/teamcity-linux-cross.sh).
 set(CMAKE_SYSTEM_NAME Windows)
 set(CMAKE_SYSTEM_PROCESSOR x86_64)
 set(CMAKE_C_COMPILER x86_64-w64-mingw32-gcc)

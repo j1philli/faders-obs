@@ -19,6 +19,11 @@ SetCompressor /SOLID lzma
 ; makensis compiles from this script's folder, so paths are relative to it.
 !define ROOT "../.."
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\FadersOBS"
+; -DSIGN=path/to/sign-windows.sh signs the uninstaller (as it's generated) and the finished installer.
+!ifdef SIGN
+  !uninstfinalize '"${SIGN}" "%1"' = 0
+  !finalize '"${SIGN}" "%1"' = 0
+!endif
 
 Name "Faders for OBS"
 Caption "Faders for OBS ${VERSION} Setup"

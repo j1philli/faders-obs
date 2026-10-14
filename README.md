@@ -57,17 +57,18 @@ cmake -S . -B build -A x64; cmake --build build --config Release
 .\scripts\install-windows.ps1                 # (as admin) → %ProgramData%\obs-studio\plugins\faders
 ```
 
-Cross-compiling from macOS or Linux for a quick check: `./scripts/cross-windows.sh` (MinGW-w64)
+Cross-compiling from macOS or Linux (how releases are built): `./scripts/cross-windows.sh` (MinGW-w64)
 → `build-win/faders.dll`; `scripts/ci/check-windows-dll.py` verifies its exports and imports.
 
 Installer: `makensis -DVERSION=0.1.0 -DDLL=<path>/faders.dll -DOUTFILE=<path>/faders-obs-0.1.0-windows.exe installer/windows/faders.nsi`
 (NSIS 3, on Windows or Linux). The installer art in `installer/` is generated from the Faders
 brand kit.
 
-CI runs on TeamCity (`scripts/ci/`): `teamcity-macos.sh` and `teamcity-windows.ps1` build
-natively, run the end-to-end test below against `test/mock-hub.mjs` and package (zip + `.pkg`;
-zip + `.exe` when NSIS is on the Windows agent); `teamcity-linux-cross.sh` (in `ubuntu:24.04`)
-cross-builds with MinGW, checks the DLL statically and builds the `.exe` installer.
+CI runs on TeamCity (`scripts/ci/`): `teamcity-macos.sh` builds natively, runs the end-to-end
+test below against `test/mock-hub.mjs` and packages (zip + `.pkg`; on `main` also Developer ID
+signed and notarized). `teamcity-linux-cross.sh` (in `ubuntu:24.04`) cross-builds the Windows
+release with MinGW, checks the DLL statically and builds the `.exe` installer; on `main` it signs
+the DLL, installer and uninstaller with Azure Trusted Signing (`scripts/sign-windows.sh`).
 
 ## Test without the OBS GUI
 

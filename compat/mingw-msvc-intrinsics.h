@@ -9,7 +9,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 // MinGW-only shim: libobs's Windows headers (util/threading-windows.h) use MSVC intrinsics that
-// GCC doesn't provide. Release builds use MSVC and never include this file.
+// GCC doesn't provide. MSVC builds never include this file.
 #pragma once
 #if defined(__MINGW32__) && !defined(_MSC_VER)
 static inline int __iso_volatile_load32(const volatile int *p)
