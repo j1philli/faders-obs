@@ -8,17 +8,27 @@
 #   MACOS_APP_IDENTITY        "Developer ID Application: …"  signs the plugin (hardened runtime)
 #   MACOS_INSTALLER_IDENTITY  "Developer ID Installer: …"    signs the .pkg
 #   MACOS_NOTARY_PROFILE      notarytool keychain profile    notarizes and staples the .pkg
+# or, instead of a profile, an App Store Connect API key (the same kind of key used for iOS uploads):
+#   MACOS_NOTARY_KEY_PATH, MACOS_NOTARY_KEY_ID, MACOS_NOTARY_ISSUER
+# On CI the identities can live in their own keychain, unlocked for the build:
+#   MACOS_KEYCHAIN_PATH, MACOS_KEYCHAIN_PASSWORD_FILE
 set -euo pipefail
 cd "$(dirname "$0")/.."
 VERSION="${FADERS_VERSION:-$(sed -n 's/^project(faders VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)}"
 OUT="faders-obs-$VERSION-macos.pkg"
 WORK=package/macos
+keychain=()
 rm -rf "$WORK" && mkdir -p "$WORK/root" "$WORK/resources"
+
+if [ -n "${MACOS_KEYCHAIN_PATH:-}" ]; then
+  security unlock-keychain -p "$(cat "$MACOS_KEYCHAIN_PASSWORD_FILE")" "$MACOS_KEYCHAIN_PATH"
+  keychain=(--keychain "$MACOS_KEYCHAIN_PATH")
+fi
 
 # No extended attributes or resource forks: pkgbuild would ship them as ._ files.
 ditto --norsrc --noextattr --noqtn --noacl build/faders.plugin "$WORK/root/faders.plugin"
 if [ -n "${MACOS_APP_IDENTITY:-}" ]; then
-  codesign --force --timestamp --options runtime --sign "$MACOS_APP_IDENTITY" "$WORK/root/faders.plugin"
+  codesign --force --timestamp --options runtime ${keychain[@]+"${keychain[@]}"} --sign "$MACOS_APP_IDENTITY" "$WORK/root/faders.plugin"
 fi
 
 # Keep the bundle where we put it (no "relocation" to a copy found elsewhere on disk).
@@ -34,12 +44,15 @@ cp installer/macos/welcome.html installer/macos/conclusion.html "$WORK/resources
 sed "s/@VERSION@/$VERSION/" installer/macos/distribution.xml > "$WORK/distribution.xml"
 
 sign=()
-[ -n "${MACOS_INSTALLER_IDENTITY:-}" ] && sign=(--sign "$MACOS_INSTALLER_IDENTITY" --timestamp)
+[ -n "${MACOS_INSTALLER_IDENTITY:-}" ] && sign=(--sign "$MACOS_INSTALLER_IDENTITY" --timestamp ${keychain[@]+"${keychain[@]}"})
 productbuild --distribution "$WORK/distribution.xml" --resources "$WORK/resources" --package-path "$WORK" \
   ${sign[@]+"${sign[@]}"} "$OUT" >/dev/null
 
-if [ -n "${MACOS_NOTARY_PROFILE:-}" ]; then
-  xcrun notarytool submit "$OUT" --keychain-profile "$MACOS_NOTARY_PROFILE" --wait
+notary=()
+[ -n "${MACOS_NOTARY_PROFILE:-}" ] && notary=(--keychain-profile "$MACOS_NOTARY_PROFILE")
+[ -n "${MACOS_NOTARY_KEY_PATH:-}" ] && notary=(--key "$MACOS_NOTARY_KEY_PATH" --key-id "$MACOS_NOTARY_KEY_ID" --issuer "$MACOS_NOTARY_ISSUER")
+if [ ${#notary[@]} -gt 0 ]; then
+  xcrun notarytool submit "$OUT" "${notary[@]}" --wait
   xcrun stapler staple "$OUT"
 fi
 echo "built $OUT ($([ ${#sign[@]} -gt 0 ] && echo signed || echo unsigned))"
