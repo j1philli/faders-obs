@@ -31,6 +31,7 @@ MODULE_EXPORT const char *obs_module_description(void)
 
 #define SOURCE_ID "faders_uplink"
 #define PORTAL_URL "https://faders.tv/portal/"
+#define DOWNLOAD_URL "https://faders.tv/streamers/#download"
 // Production hub. The key alone identifies the channel, so streamers only paste their key; the
 // server stays editable (Advanced) for testing against another hub.
 #define DEFAULT_SERVER "wss://hub.faders.tv/ingest"
@@ -80,12 +81,17 @@ static void apply_current(void)
 	obs_data_release(s);
 }
 
+static void get_status(fdr_uplink_status *st)
+{
+	pthread_mutex_lock(&uplink_mu);
+	fdr_uplink_get_status(uplink, st);
+	pthread_mutex_unlock(&uplink_mu);
+}
+
 static void status_text(struct dstr *out)
 {
 	fdr_uplink_status st;
-	pthread_mutex_lock(&uplink_mu);
-	fdr_uplink_get_status(uplink, &st);
-	pthread_mutex_unlock(&uplink_mu);
+	get_status(&st);
 	if (!st.running)
 		dstr_copy(out, streaming ? "Not running. Check the server and key." : "Idle. Starts when you go live.");
 	else if (!st.connected)
@@ -145,6 +151,18 @@ static obs_properties_t *src_properties(void *data)
 	obs_property_t *st = obs_properties_add_text(props, "status_info", status.array, OBS_TEXT_INFO);
 	obs_property_text_set_info_type(st, OBS_TEXT_INFO_NORMAL);
 	dstr_free(&status);
+
+	// The hub says when a newer release is out; the link always goes to faders.tv.
+	fdr_uplink_status now;
+	get_status(&now);
+	if (now.update_available[0]) {
+		struct dstr label = {0};
+		dstr_printf(&label, "Update available: Faders %s (you have %s). Download", now.update_available, FDR_VERSION_STR);
+		obs_property_t *upd = obs_properties_add_button(props, "update", label.array, NULL);
+		obs_property_button_set_type(upd, OBS_BUTTON_URL);
+		obs_property_button_set_url(upd, DOWNLOAD_URL);
+		dstr_free(&label);
+	}
 
 	obs_properties_add_bool(props, "enabled", "Send Faders layers");
 	obs_properties_add_text(props, "key", "Key", OBS_TEXT_PASSWORD);

@@ -160,7 +160,21 @@ static void on_text(void *param, const char *text)
 	pthread_mutex_lock(&u->mu);
 	u->last_rx_ns = os_gettime_ns();
 	pthread_mutex_unlock(&u->mu);
-	// The hub sends {"type":"listeners","n":N} (and "pong"). Tiny, fixed shape: no JSON parser.
+	// The hub sends {"type":"listeners","n":N}, {"type":"update","latest":"X.Y.Z"} and "pong".
+	// Tiny, fixed shapes: no JSON parser.
+	const char *latest = strstr(text, "\"latest\":\"");
+	if (strstr(text, "\"update\"") && latest) {
+		latest += 10;
+		size_t n = strspn(latest, "0123456789.");
+		pthread_mutex_lock(&u->mu);
+		if (n > 0 && n < sizeof(u->status.update_available)) {
+			memcpy(u->status.update_available, latest, n);
+			u->status.update_available[n] = 0;
+		}
+		pthread_mutex_unlock(&u->mu);
+		blog(LOG_INFO, "[faders] update available: %.*s (this is %s)", (int)n, latest, FDR_VERSION_STR);
+		return;
+	}
 	if (!strstr(text, "\"listeners\""))
 		return;
 	const char *n = strstr(text, "\"n\":");

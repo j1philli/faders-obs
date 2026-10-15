@@ -29,6 +29,8 @@ typedef struct fdr_uplink_status {
 	int uplink_kbps;
 	unsigned long long chunks_sent;
 	char last_error[160];
+	char update_available[24]; // newer published version the hub told us about, or ""
+
 } fdr_uplink_status;
 
 fdr_uplink_t *fdr_uplink_start(const fdr_uplink_config *cfg);
