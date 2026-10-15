@@ -34,6 +34,8 @@
 #define RING_SAMPLES (SAMPLE_RATE * 4)    // 4 s per stem; overflow drops the oldest audio
 #define HEADER_BYTES 16
 #define PROTOCOL_VERSION 1
+#define PING_EVERY_NS 20000000000ULL    // heartbeat while connected
+#define SILENCE_LIMIT_NS 60000000000ULL // nothing from the hub for this long: reconnect
 
 struct ring {
 	float buf[RING_SAMPLES];
@@ -77,6 +79,10 @@ struct fdr_uplink {
 	fdr_ws_t *ws;
 	bool connected;
 	int listeners;
+	// Heartbeat: an idle connection (no listeners, nothing sent) can die silently behind a
+	// NAT or proxy. The hub answers "ping" with "pong"; no reply for a while means reconnect.
+	uint64_t last_rx_ns;
+	uint64_t last_ping_ns;
 	uint64_t next_connect_ns;
 	uint64_t backoff_ns;
 
@@ -139,6 +145,8 @@ static void on_open(void *param)
 	pthread_mutex_lock(&u->mu);
 	u->connected = true;
 	u->backoff_ns = 0;
+	u->last_rx_ns = os_gettime_ns();
+	u->last_ping_ns = u->last_rx_ns;
 	u->last_sent_seq = -1; // the hub may have restarted: offer everything we still hold
 	u->conn_gen++;
 	u->status.last_error[0] = 0;
@@ -149,7 +157,10 @@ static void on_open(void *param)
 static void on_text(void *param, const char *text)
 {
 	struct fdr_uplink *u = param;
-	// The hub sends {"type":"listeners","n":N}. Tiny, fixed shape: no JSON parser needed.
+	pthread_mutex_lock(&u->mu);
+	u->last_rx_ns = os_gettime_ns();
+	pthread_mutex_unlock(&u->mu);
+	// The hub sends {"type":"listeners","n":N} (and "pong"). Tiny, fixed shape: no JSON parser.
 	if (!strstr(text, "\"listeners\""))
 		return;
 	const char *n = strstr(text, "\"n\":");
@@ -204,8 +215,21 @@ static void flush(struct fdr_uplink *u)
 static void maintain_connection(struct fdr_uplink *u, uint64_t now)
 {
 	pthread_mutex_lock(&u->mu);
+	bool open = u->ws && u->connected;
+	bool ping_due = open && now - u->last_ping_ns >= PING_EVERY_NS;
+	if (open && now - u->last_rx_ns >= SILENCE_LIMIT_NS) {
+		u->connected = false;
+		u->listeners = 0;
+		set_error(u, "no response from the server");
+		blog(LOG_WARNING, "[faders] no response from the server; reconnecting");
+		open = ping_due = false;
+	}
+	if (ping_due)
+		u->last_ping_ns = now;
 	bool dead = u->ws && !u->connected && u->status.last_error[0];
 	pthread_mutex_unlock(&u->mu);
+	if (ping_due)
+		fdr_ws_send_text(u->ws, "ping");
 	if (dead) {
 		fdr_ws_destroy(u->ws);
 		u->ws = NULL;

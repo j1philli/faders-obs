@@ -120,14 +120,13 @@ fdr_ws_t *fdr_ws_connect(const char *url, const char *bearer, const fdr_ws_callb
 	}
 }
 
-bool fdr_ws_send_binary(fdr_ws_t *ws, const uint8_t *data, size_t len)
+static bool fdr_ws_send(fdr_ws_t *ws, NSURLSessionWebSocketMessage *(^make)(void))
 {
 	if (!ws || !atomic_load(&ws->open) || atomic_load(&ws->pending) >= MAX_PENDING_SENDS)
 		return false;
 	@autoreleasepool {
 		atomic_fetch_add(&ws->pending, 1);
-		NSData *payload = [NSData dataWithBytes:data length:len];
-		NSURLSessionWebSocketMessage *msg = [[NSURLSessionWebSocketMessage alloc] initWithData:payload];
+		NSURLSessionWebSocketMessage *msg = make();
 		[ws->task sendMessage:msg
 		    completionHandler:^(NSError *err) {
 			    atomic_fetch_sub(&ws->pending, 1);
@@ -136,6 +135,20 @@ bool fdr_ws_send_binary(fdr_ws_t *ws, const uint8_t *data, size_t len)
 		    }];
 	}
 	return true;
+}
+
+bool fdr_ws_send_binary(fdr_ws_t *ws, const uint8_t *data, size_t len)
+{
+	return fdr_ws_send(ws, ^{
+		return [[NSURLSessionWebSocketMessage alloc] initWithData:[NSData dataWithBytes:data length:len]];
+	});
+}
+
+bool fdr_ws_send_text(fdr_ws_t *ws, const char *text)
+{
+	return fdr_ws_send(ws, ^{
+		return [[NSURLSessionWebSocketMessage alloc] initWithString:[NSString stringWithUTF8String:text]];
+	});
 }
 
 void fdr_ws_destroy(fdr_ws_t *ws)

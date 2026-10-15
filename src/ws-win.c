@@ -185,12 +185,12 @@ fdr_ws_t *fdr_ws_connect(const char *url, const char *bearer, const fdr_ws_callb
 	return ws;
 }
 
-bool fdr_ws_send_binary(fdr_ws_t *ws, const uint8_t *data, size_t len)
+static bool ws_send(fdr_ws_t *ws, WINHTTP_WEB_SOCKET_BUFFER_TYPE type, const void *data, size_t len)
 {
 	if (!ws || !ws->open)
 		return false;
 	EnterCriticalSection(&ws->send_lock);
-	DWORD err = WinHttpWebSocketSend(ws->socket, WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE, (PVOID)data, (DWORD)len);
+	DWORD err = WinHttpWebSocketSend(ws->socket, type, (PVOID)data, (DWORD)len);
 	LeaveCriticalSection(&ws->send_lock);
 	if (err != NO_ERROR) {
 		char reason[96];
@@ -199,6 +199,16 @@ bool fdr_ws_send_binary(fdr_ws_t *ws, const uint8_t *data, size_t len)
 		return false;
 	}
 	return true;
+}
+
+bool fdr_ws_send_binary(fdr_ws_t *ws, const uint8_t *data, size_t len)
+{
+	return ws_send(ws, WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE, data, len);
+}
+
+bool fdr_ws_send_text(fdr_ws_t *ws, const char *text)
+{
+	return ws_send(ws, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE, text, strlen(text));
 }
 
 void fdr_ws_destroy(fdr_ws_t *ws)

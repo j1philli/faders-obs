@@ -32,6 +32,8 @@ typedef struct fdr_ws_callbacks {
 fdr_ws_t *fdr_ws_connect(const char *url, const char *bearer, const fdr_ws_callbacks *cb, void *param);
 // Queues a binary message. Returns false if the socket isn't open or too much is queued.
 bool fdr_ws_send_binary(fdr_ws_t *ws, const uint8_t *data, size_t len);
+// Queues a text message (heartbeats). Same return contract as fdr_ws_send_binary.
+bool fdr_ws_send_text(fdr_ws_t *ws, const char *text);
 // Closes (if needed) and frees. No callbacks fire after this returns.
 void fdr_ws_destroy(fdr_ws_t *ws);
 
