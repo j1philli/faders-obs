@@ -1,4 +1,6 @@
-# Faders OBS plugin
+# Faders
+
+A plugin for [OBS Studio](https://obsproject.com). Faders isn't affiliated with or endorsed by the OBS Project.
 
 Sends your **voice**, **game** and **music** as three separate layers to the Faders hub so
 viewers can mix them. Your Twitch stream is not touched.

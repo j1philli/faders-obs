@@ -33,4 +33,4 @@ export AZURE_SIGNING_TOKEN
 java -jar "$jar" --storetype TRUSTEDSIGNING --keystore "$AZURE_SIGNING_ENDPOINT" \
   --storepass env:AZURE_SIGNING_TOKEN --alias "$AZURE_SIGNING_ACCOUNT/$AZURE_SIGNING_PROFILE" \
   --tsaurl http://timestamp.acs.microsoft.com --tsmode RFC3161 \
-  --name "Faders for OBS" --url https://faders.tv "$@"
+  --name "Faders" --url https://faders.tv "$@"

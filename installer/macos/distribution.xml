@@ -3,7 +3,7 @@
 <!-- productbuild distribution for the Faders OBS plugin. Installs for the current user only,
      into ~/Library/Application Support/obs-studio/plugins, where OBS looks for plugins. -->
 <installer-gui-script minSpecVersion="2">
-  <title>Faders for OBS</title>
+  <title>Faders</title>
   <background file="bg.tiff" alignment="bottomleft" scaling="none" />
   <background-darkAqua file="bg.tiff" alignment="bottomleft" scaling="none" />
   <welcome file="welcome.html" mime-type="text/html" />
@@ -16,7 +16,7 @@
   <choices-outline>
     <line choice="tv.faders.obs-plugin" />
   </choices-outline>
-  <choice id="tv.faders.obs-plugin" title="Faders for OBS" visible="false">
+  <choice id="tv.faders.obs-plugin" title="Faders" visible="false">
     <pkg-ref id="tv.faders.obs-plugin" />
   </choice>
   <pkg-ref id="tv.faders.obs-plugin" version="@VERSION@" onConclusion="none">faders-component.pkg</pkg-ref>

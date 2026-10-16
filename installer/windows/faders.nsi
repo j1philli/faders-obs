@@ -25,18 +25,18 @@ SetCompressor /SOLID lzma
   !finalize '"${SIGN}" "%1"' = 0
 !endif
 
-Name "Faders for OBS"
-Caption "Faders for OBS ${VERSION} Setup"
+Name "Faders"
+Caption "Faders ${VERSION} Setup"
 OutFile "${OUTFILE}"
 RequestExecutionLevel admin
 InstallDir "$COMMONPROGRAMDATA\obs-studio\plugins\faders"
 BrandingText "faders.tv"
 
 VIProductVersion "${VERSION}.0"
-VIAddVersionKey "ProductName" "Faders for OBS"
+VIAddVersionKey "ProductName" "Faders"
 VIAddVersionKey "CompanyName" "Faders"
 VIAddVersionKey "LegalCopyright" "GPL-2.0-or-later"
-VIAddVersionKey "FileDescription" "Faders for OBS installer"
+VIAddVersionKey "FileDescription" "Faders installer (plugin for OBS Studio)"
 VIAddVersionKey "FileVersion" "${VERSION}"
 VIAddVersionKey "ProductVersion" "${VERSION}"
 
@@ -51,7 +51,7 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 !define MUI_HEADERIMAGE_UNBITMAP "header.bmp"
 !define MUI_ABORTWARNING
 
-!define MUI_WELCOMEPAGE_TITLE "Faders for OBS"
+!define MUI_WELCOMEPAGE_TITLE "Faders"
 !define MUI_WELCOMEPAGE_TEXT "Faders sends your voice, game and music as separate layers, so each viewer with the Faders browser extension can set their own levels. Your Twitch stream doesn't change.$\r$\n$\r$\nClose OBS before you continue."
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "${ROOT}/LICENSE"
@@ -77,7 +77,7 @@ Section "Faders" SecMain
   File "/oname=faders.ico" "faders.ico"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
-  WriteRegStr HKLM "${UNINST_KEY}" "DisplayName" "Faders for OBS"
+  WriteRegStr HKLM "${UNINST_KEY}" "DisplayName" "Faders"
   WriteRegStr HKLM "${UNINST_KEY}" "DisplayVersion" "${VERSION}"
   WriteRegStr HKLM "${UNINST_KEY}" "Publisher" "Faders"
   WriteRegStr HKLM "${UNINST_KEY}" "URLInfoAbout" "https://faders.tv/"
