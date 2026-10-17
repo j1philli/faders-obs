@@ -5,6 +5,10 @@ A plugin for [OBS Studio](https://obsproject.com). Faders isn't affiliated with 
 Sends your **voice**, **game** and **music** as three separate layers to the Faders hub so
 viewers can mix them. Your Twitch stream is not touched.
 
+**Get it:** download the installer from [faders.tv/streamers](https://faders.tv/streamers/) or the
+[latest release](https://github.com/j1philli/faders-obs/releases/latest), and get your key from the
+[Faders portal](https://faders.tv/portal/). Setup guide: [faders.tv/docs/streamer-setup](https://faders.tv/docs/streamer-setup/).
+
 - **Tools → Faders** opens the settings (OBS's own properties window, no custom UI code):
   key, which mixer track is voice / game / music, "only send while streaming". The server
   defaults to `wss://hub.faders.tv/ingest` (the key identifies the channel); it's editable under
@@ -16,6 +20,10 @@ viewers can mix them. Your Twitch stream is not touched.
   plugin keeps a 60 s backlog and replays it when the first listener arrives.
 - The key goes in an `Authorization: Bearer` header. Reconnects back off 1 s → 30 s, so a wrong
   key doesn't hammer the hub. Status shows in the settings window and the OBS log (`[faders]`).
+- Heartbeat: pings the hub every 20 s and reconnects after 60 s without a reply, so a connection
+  silently dropped by a router or proxy recovers on its own.
+- When the hub reports a newer release, **Tools → Faders** shows "Update available" with a link
+  to the download page. The plugin never updates itself.
 - Scriptable: procedures `faders_configure(server, key, voice, game, music, only_live)` and
   `faders_status(out status)` on the global proc handler.
 
@@ -32,13 +40,16 @@ Everything is shared C except the WebSocket transport (`src/ws.h`):
 
 ## Install
 
-Download the installer for your platform and run it, then restart OBS and open
-**Tools → Faders**:
+Download the installer for your platform from the
+[latest release](https://github.com/j1philli/faders-obs/releases/latest) and run it, then restart
+OBS and open **Tools → Faders**:
 
 - **macOS 13+** (Apple silicon and Intel): `faders-obs-<version>-macos.pkg`. Installs for your
-  user into `~/Library/Application Support/obs-studio/plugins`.
+  user into `~/Library/Application Support/obs-studio/plugins`. Signed with a Developer ID and
+  notarized by Apple.
 - **Windows 10/11 x64**: `faders-obs-<version>-windows.exe`. Installs into
-  `%ProgramData%\obs-studio\plugins\faders`; uninstall from Settings → Apps.
+  `%ProgramData%\obs-studio\plugins\faders`; uninstall from Settings → Apps. The plugin DLL,
+  installer and uninstaller are code-signed (Azure Trusted Signing).
 
 ## Build (macOS)
 
@@ -71,6 +82,7 @@ test below against `test/mock-hub.mjs` and packages (zip + `.pkg`; on `main` als
 signed and notarized). `teamcity-linux-cross.sh` (in `ubuntu:24.04`) cross-builds the Windows
 release with MinGW, checks the DLL statically and builds the `.exe` installer; on `main` it signs
 the DLL, installer and uninstaller with Azure Trusted Signing (`scripts/sign-windows.sh`).
+The signed `main` builds become a draft GitHub release, which is published by hand.
 
 ## Test without the OBS GUI
 
@@ -97,19 +109,20 @@ Verified: wrong key → "server rejected connection (HTTP 401)" with backoff; co
 pauses at 0 listeners, resumes and replays backlog on the first listener; Chrome decodes every
 frame and each decoded layer correlates 0.97–0.997 with its own source and ≤0.37 with the others.
 
-## Not done yet
+## Not verified yet
 
-- **Windows runtime is unverified:** the DLL cross-compiles, exports exactly the 8 functions
+Released as 0.1.0. These parts haven't been tested by hand yet; bug reports are welcome
+(GitHub issues, or the Faders Discord: discord.gg/TA7Xd8CEAz).
+
+- **Windows in the OBS app:** the DLL cross-compiles, exports exactly the 8 functions
   libobs looks up, and every one of its 60 OBS imports exists in the real OBS 32.2.2 DLLs, but it
   has only run in libobs headlessly (CI), not yet clicked through in the OBS app on Windows.
-- **Linux:** needs a libcurl transport (`src/ws-curl.c`); everything else is shared.
 - **Intel Macs:** the universal build links each architecture against its own OBS release, but
   the x86_64 half hasn't been run yet (no Intel Mac / Rosetta in CI).
-- **Signing:** installers are unsigned. macOS needs a Developer ID + notarization (Apple
-  Developer Program, $99/yr; `package-macos.sh` does it once `MACOS_*` are set); Windows
-  SmartScreen warns about unsigned installers until they're code-signed.
 - **GUI check in real OBS:** the Tools menu + properties window haven't been clicked through in
   the OBS app yet (the headless test bypasses the frontend).
+- **Linux:** not supported yet. It needs a libcurl transport (`src/ws-curl.c`); everything else
+  is shared.
 
 ## License
 
