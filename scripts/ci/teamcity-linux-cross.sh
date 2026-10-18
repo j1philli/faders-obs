@@ -6,6 +6,8 @@
 # scripts/sign-windows.sh) the DLL, installer and uninstaller are signed with Azure Trusted Signing.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+# The checkout persists between builds: drop earlier versions' installers so only this one is an artifact.
+rm -f faders-obs-*-windows.exe faders-obs-windows-cross.zip
 export DEBIAN_FRONTEND=noninteractive
 if ! command -v x86_64-w64-mingw32-gcc >/dev/null; then
   apt-get update -qq

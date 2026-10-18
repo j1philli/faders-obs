@@ -42,6 +42,6 @@ HOST=$!
 sleep 6
 node test/plugin-listener.mjs --server "ws://127.0.0.1:$PORT" --channel ci_channel --seconds 20
 
-rm -f faders-obs-macos.zip
+rm -f faders-obs-macos.zip faders-obs-*-macos.pkg # earlier versions' installers stay in the checkout
 (cd build && zip -qry ../faders-obs-macos.zip faders.plugin)
 ./scripts/package-macos.sh
