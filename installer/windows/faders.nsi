@@ -1,8 +1,11 @@
 ; SPDX-License-Identifier: GPL-2.0-or-later
 ; Windows installer for the Faders OBS plugin (NSIS 3, builds on Linux or Windows):
 ;   makensis -DVERSION=0.1.0 -DDLL=build-win/faders.dll -DOUTFILE=faders-obs-0.1.0-windows.exe installer/windows/faders.nsi
-; Installs to %ProgramData%\obs-studio\plugins\faders, the per-machine plugin folder OBS 28+
-; scans, and registers an uninstaller in Settings → Apps.
+; Installs to %ProgramData%\obs-studio\plugins\faders, the per-machine plugin folder, and
+; registers an uninstaller in Settings → Apps. The DLL goes in two places, sharing one data folder:
+;   faders\faders.dll          OBS 33+ (https://obsproject.com/kb/legacy-plugin-locations)
+;   faders\bin\64bit\faders.dll OBS 32 and older; OBS 33 skips it once the copy above has loaded
+; Drop bin\64bit (and delete it on install) once OBS 33 is the minimum.
 Unicode true
 ManifestDPIAware true
 SetCompressor /SOLID lzma
@@ -69,6 +72,8 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 Section "Faders" SecMain
   SectionIn RO
   SetShellVarContext all
+  SetOutPath "$INSTDIR"
+  File "/oname=faders.dll" "${DLL}"
   SetOutPath "$INSTDIR\bin\64bit"
   File "/oname=faders.dll" "${DLL}"
   SetOutPath "$INSTDIR\data"
@@ -92,6 +97,7 @@ SectionEnd
 
 Section "Uninstall"
   SetShellVarContext all
+  Delete "$INSTDIR\faders.dll"
   Delete "$INSTDIR\bin\64bit\faders.dll"
   RMDir "$INSTDIR\bin\64bit"
   RMDir "$INSTDIR\bin"

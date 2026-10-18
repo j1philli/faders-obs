@@ -22,7 +22,8 @@ python3 scripts/ci/check-windows-dll.py build-win/faders.dll .deps/win/lib
 python3 - <<'PY'
 import zipfile, pathlib
 with zipfile.ZipFile("faders-obs-windows-cross.zip", "w", zipfile.ZIP_DEFLATED) as z:
-    z.write("build-win/faders.dll", "faders/bin/64bit/faders.dll")
+    z.write("build-win/faders.dll", "faders/faders.dll")  # OBS 33+
+    z.write("build-win/faders.dll", "faders/bin/64bit/faders.dll")  # OBS 32
     for p in pathlib.Path("data").rglob("*"):
         if p.is_file():
             z.write(p, f"faders/data/{p.relative_to('data')}")

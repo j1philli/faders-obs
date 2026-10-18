@@ -4,7 +4,7 @@
 # Dependencies live in .deps/ (scripts/fetch-deps.sh on macOS, scripts/fetch-deps-windows.ps1 on
 # Windows, scripts/cross-windows.sh to cross-compile the Windows DLL from macOS).
 cmake_minimum_required(VERSION 3.24)
-project(faders VERSION 0.1.0 LANGUAGES C)
+project(faders VERSION 0.1.1 LANGUAGES C)
 
 set(OBS_VERSION "32.2.2" CACHE STRING "OBS Studio version to build against")
 set(OBS_SRC "${CMAKE_SOURCE_DIR}/.deps/obs-studio-src" CACHE PATH "obs-studio source (headers)")
