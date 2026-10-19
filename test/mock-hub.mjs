@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Minimal stand-in for the Faders hub, for testing the plugin (CI or local). Speaks PROTOCOL.md:
 //   /ingest/<channel>  plugin uplink (Bearer or ?token= must equal --token), receives
-//                      {"type":"listeners","n":N} whenever the listener count changes
+//                      {"type":"listeners","n":N} whenever the listener count changes, and
+//                      {"type":"quality","kbps":N} on connect when --kbps is given
 //   /listen/<channel>  viewers: {"type":"backlog"} + up to 60 s of chunks, {"type":"live"}, then live
 //
-//   node test/mock-hub.mjs [--port 8787] [--token dev-token]
+//   node test/mock-hub.mjs [--port 8787] [--token dev-token] [--kbps 256]
 import { createServer } from "node:http";
 import { parseArgs } from "node:util";
 import { WebSocketServer } from "ws";
 
-const { values: args } = parseArgs({ options: { port: { type: "string", default: "8787" }, token: { type: "string", default: "dev-token" } } });
+const { values: args } = parseArgs({ options: { port: { type: "string", default: "8787" }, token: { type: "string", default: "dev-token" }, kbps: { type: "string" } } });
 const RING_MS = 60_000;
 const channels = new Map(); // name -> { ingest, listeners:Set, ring:[], lastSeq }
 const chan = (name) => {
@@ -40,6 +41,7 @@ server.on("upgrade", (req, socket, head) => {
     if (role === "ingest") {
       c.ingest?.close(4000, "replaced by new ingest connection");
       c.ingest = ws;
+      if (args.kbps) ws.send(JSON.stringify({ type: "quality", kbps: Number(args.kbps) }));
       notify(c);
       ws.on("message", (data, isBinary) => {
         if (!isBinary || data.length < 16) return;

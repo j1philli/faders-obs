@@ -42,6 +42,17 @@ HOST=$!
 sleep 6
 node test/plugin-listener.mjs --server "ws://127.0.0.1:$PORT" --channel ci_channel --seconds 20
 
+# The hub sets the channel's audio quality; the plugin follows it.
+Q_PORT=$((PORT + 1))
+node test/mock-hub.mjs --port "$Q_PORT" --kbps 256 > hub-quality.log 2>&1 &
+QHUB=$!
+trap 'kill $HUB $QHUB ${HOST:-} ${QHOST:-} 2>/dev/null || true' EXIT
+for _ in $(seq 1 30); do curl -s "localhost:$Q_PORT/health" | grep -q ok && break; sleep 1; done
+build/faders-headless "ws://127.0.0.1:$Q_PORT/ingest/ci_channel" dev-token "$M/voice.wav" "$M/game.wav" "$M/music.wav" 30 > host-quality.log 2>&1 &
+QHOST=$!
+sleep 6
+node test/plugin-listener.mjs --server "ws://127.0.0.1:$Q_PORT" --channel ci_channel --seconds 15 --kbps 256
+
 rm -f faders-obs-macos.zip faders-obs-*-macos.pkg # earlier versions' installers stay in the checkout
 (cd build && zip -qry ../faders-obs-macos.zip faders.plugin)
 ./scripts/package-macos.sh

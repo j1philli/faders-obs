@@ -17,7 +17,8 @@ viewers can mix them. Your Twitch stream is not touched.
   written from the project version by CMake).
 - Taps OBS mixer tracks with `obs_add_raw_audio_callback` (default tracks 2/3/4). Assign
   sources in *Edit → Advanced Audio Properties*.
-- Opus 64 kbps, 20 ms frames, 500 ms chunks (`PROTOCOL.md`). ~190 kbps total upload,
+- Stereo Opus at 128 kbps per track (at least Twitch's ~160 kbps stereo AAC), 20 ms frames,
+  500 ms chunks (`PROTOCOL.md`). Up to ~390 kbps total upload (less for quiet or mono tracks),
   and **0 while nobody is listening**: the hub tells the plugin its listener count, the
   plugin keeps a 60 s backlog and replays it when the first listener arrives.
 - The key goes in an `Authorization: Bearer` header. Reconnects back off 1 s → 30 s, so a wrong

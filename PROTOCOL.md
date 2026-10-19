@@ -14,11 +14,14 @@ offset size field
                          nFrames × (u16 len, len bytes raw Opus packet)
 ```
 
+Opus packets are 48 kHz stereo (plugin 0.2.0+; earlier plugins sent mono, which players decode as stereo).
+
 Text (JSON) control messages:
 
 | Direction        | Message                                  | Meaning                                   |
 |------------------|------------------------------------------|-------------------------------------------|
 | hub → plugin     | `{"type":"listeners","n":3}`             | listener count; plugin pauses uplink at 0 |
+| hub → plugin     | `{"type":"quality","kbps":192}`          | kbps per track (plan-capped); default 128 |
 | hub → listener   | `{"type":"backlog","count":120}`         | next `count` binary chunks are history    |
 | hub → listener   | `{"type":"live"}`                        | following chunks are live                 |
 

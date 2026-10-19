@@ -28,10 +28,16 @@
 #define CHUNK_MS 500
 #define FRAMES_PER_CHUNK (CHUNK_MS / FRAME_MS) // 25
 #define STEMS 3
-#define OPUS_BITRATE 64000
+// Every stem is stereo at the same bitrate, whatever it carries. Twitch serves ~160 kbps stereo
+// AAC-LC; 128 kbps stereo Opus is at least as good, and is the default. The hub can raise it
+// ({"type":"quality","kbps":N}) for channels whose plan includes more.
+#define CHANNELS 2
+#define OPUS_BITRATE 128000
+#define MIN_BITRATE 64000
+#define MAX_BITRATE 256000
 #define MAX_PACKET 1500
-#define BACKLOG_CHUNKS (60000 / CHUNK_MS) // 60 s, replayed when a listener arrives
-#define RING_SAMPLES (SAMPLE_RATE * 4)    // 4 s per stem; overflow drops the oldest audio
+#define BACKLOG_CHUNKS (60000 / CHUNK_MS)        // 60 s, replayed when a listener arrives
+#define RING_SAMPLES (SAMPLE_RATE * 4 * CHANNELS) // 4 s per stem, interleaved; overflow drops the oldest audio
 #define HEADER_BYTES 16
 #define PROTOCOL_VERSION 1
 #define PING_EVERY_NS 20000000000ULL    // heartbeat while connected
@@ -69,6 +75,8 @@ struct fdr_uplink {
 	uint64_t start_ts; // first audio timestamp all stems accept, so they start aligned
 
 	OpusEncoder *enc[STEMS];
+	int bitrate;      // what the encoders use (worker thread only)
+	int want_bitrate; // set from the hub's message (guarded by mu)
 	// The chunk being assembled: per stem, FRAMES_PER_CHUNK Opus packets.
 	uint8_t packets[STEMS][FRAMES_PER_CHUNK][MAX_PACKET];
 	int16_t packet_len[STEMS][FRAMES_PER_CHUNK];
@@ -106,11 +114,11 @@ struct fdr_uplink {
 	os_event_t *stop_event;
 };
 
-static float peak_of(const struct audio_data *data)
+static float peak_of(const struct audio_data *data, int channels)
 {
 	const float *s = (const float *)data->data[0];
 	float peak = 0.0f;
-	for (uint32_t i = 0; i < data->frames; i++) {
+	for (uint32_t i = 0; i < data->frames * channels; i++) {
 		float v = s[i] < 0 ? -s[i] : s[i];
 		if (v > peak)
 			peak = v;
@@ -152,8 +160,8 @@ static void on_audio(void *param, size_t mix_idx, struct audio_data *data)
 	if (!u->start_ts)
 		u->start_ts = data->timestamp + 50000000ULL;
 	if (data->timestamp >= u->start_ts)
-		ring_push(&u->rings[t->stem], (const float *)data->data[0], data->frames);
-	if (u->watching_stream && peak_of(data) > STEM_SOUND_PEAK)
+		ring_push(&u->rings[t->stem], (const float *)data->data[0], data->frames * CHANNELS);
+	if (u->watching_stream && peak_of(data, CHANNELS) > STEM_SOUND_PEAK)
 		u->stems_heard_ns = os_gettime_ns();
 	pthread_mutex_unlock(&u->mu);
 }
@@ -163,7 +171,7 @@ static void on_stream_audio(void *param, size_t mix_idx, struct audio_data *data
 {
 	UNUSED_PARAMETER(mix_idx);
 	struct fdr_uplink *u = ((struct tap *)param)->u;
-	if (peak_of(data) <= STREAM_SOUND_PEAK)
+	if (peak_of(data, 1) <= STREAM_SOUND_PEAK)
 		return;
 	pthread_mutex_lock(&u->mu);
 	u->stream_heard_ns = os_gettime_ns();
@@ -239,6 +247,16 @@ static void on_text(void *param, const char *text)
 		}
 		pthread_mutex_unlock(&u->mu);
 		blog(LOG_INFO, "[faders] update available: %.*s (this is %s)", (int)n, latest, FDR_VERSION_STR);
+		return;
+	}
+	const char *kbps = strstr(text, "\"kbps\":");
+	if (strstr(text, "\"quality\"") && kbps) {
+		int bps = atoi(kbps + 7) * 1000;
+		if (bps < MIN_BITRATE || bps > MAX_BITRATE)
+			return;
+		pthread_mutex_lock(&u->mu);
+		u->want_bitrate = bps;
+		pthread_mutex_unlock(&u->mu);
 		return;
 	}
 	if (!strstr(text, "\"listeners\""))
@@ -374,15 +392,24 @@ static void finish_chunk(struct fdr_uplink *u)
 // Encode every complete 20 ms frame that all three stems have.
 static void encode_ready(struct fdr_uplink *u)
 {
-	float pcm[STEMS][FRAME_SAMPLES];
+	float pcm[STEMS][FRAME_SAMPLES * CHANNELS];
+	pthread_mutex_lock(&u->mu);
+	int want = u->want_bitrate;
+	pthread_mutex_unlock(&u->mu);
+	if (want != u->bitrate) {
+		for (int s = 0; s < STEMS; s++)
+			opus_encoder_ctl(u->enc[s], OPUS_SET_BITRATE(want));
+		blog(LOG_INFO, "[faders] audio quality: %d kbps per track", want / 1000);
+		u->bitrate = want;
+	}
 	for (;;) {
 		pthread_mutex_lock(&u->mu);
 		bool ready = true;
 		for (int s = 0; s < STEMS; s++)
-			ready = ready && u->rings[s].len >= FRAME_SAMPLES;
+			ready = ready && u->rings[s].len >= FRAME_SAMPLES * CHANNELS;
 		if (ready)
 			for (int s = 0; s < STEMS; s++)
-				ring_pop(&u->rings[s], pcm[s], FRAME_SAMPLES);
+				ring_pop(&u->rings[s], pcm[s], FRAME_SAMPLES * CHANNELS);
 		pthread_mutex_unlock(&u->mu);
 		if (!ready)
 			return;
@@ -432,15 +459,16 @@ fdr_uplink_t *fdr_uplink_start(const fdr_uplink_config *cfg)
 	pthread_mutex_init(&u->mu, NULL);
 	os_event_init(&u->stop_event, OS_EVENT_TYPE_MANUAL);
 
+	u->bitrate = u->want_bitrate = OPUS_BITRATE;
 	for (int s = 0; s < STEMS; s++) {
 		int err;
-		u->enc[s] = opus_encoder_create(SAMPLE_RATE, 1, OPUS_APPLICATION_AUDIO, &err);
+		u->enc[s] = opus_encoder_create(SAMPLE_RATE, CHANNELS, OPUS_APPLICATION_AUDIO, &err);
 		opus_encoder_ctl(u->enc[s], OPUS_SET_BITRATE(OPUS_BITRATE));
 		opus_encoder_ctl(u->enc[s], OPUS_SET_COMPLEXITY(8));
 	}
 
-	// Mono float at 48 kHz, regardless of the OBS output format.
-	struct audio_convert_info conv = {.samples_per_sec = SAMPLE_RATE, .format = AUDIO_FORMAT_FLOAT, .speakers = SPEAKERS_MONO};
+	// Interleaved stereo float at 48 kHz: OBS's stereo mix as is (mono doubled, surround folded down).
+	struct audio_convert_info conv = {.samples_per_sec = SAMPLE_RATE, .format = AUDIO_FORMAT_FLOAT, .speakers = SPEAKERS_STEREO};
 	for (int s = 0; s < STEMS; s++) {
 		int track = cfg->tracks[s] < 1 || cfg->tracks[s] > 6 ? s + 2 : cfg->tracks[s];
 		u->taps[s] = (struct tap){u, s, (size_t)(track - 1)};
@@ -511,7 +539,7 @@ void fdr_uplink_watch_stream_track(fdr_uplink_t *u, int track)
 	u->status.stream_track = track;
 	u->stream_status_dirty = true;
 	pthread_mutex_unlock(&u->mu);
-	// Mono float like the stems; only the level is read.
+	// Mono float; only the level is read.
 	struct audio_convert_info conv = {.samples_per_sec = SAMPLE_RATE, .format = AUDIO_FORMAT_FLOAT, .speakers = SPEAKERS_MONO};
 	obs_add_raw_audio_callback(u->stream_tap.mix_idx, &conv, on_stream_audio, &u->stream_tap);
 	blog(LOG_INFO, "[faders] watching Track %d (streamed audio) for silence", track);
