@@ -1,0 +1,15 @@
+{
+  "display_name": "Faders",
+  "id": "tv.faders.obs",
+  "name": "faders",
+  "version": "0.1.1",
+  "description": "Lets your viewers set their own voice, game and music levels.",
+  "long_description": "Sends your voice, game and music as separate layers to the Faders hub, so viewers with the free Faders browser extension can mix them for themselves. Your stream itself doesn't change.",
+  "urls": {
+    "website": "https://faders.tv/streamers/",
+    "support": "https://faders.tv/support/",
+    "repository": "https://github.com/j1philli/faders-obs"
+  },
+  "has_icon": false,
+  "has_banner": false
+}

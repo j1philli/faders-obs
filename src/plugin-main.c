@@ -32,8 +32,8 @@ MODULE_EXPORT const char *obs_module_description(void)
 #define SOURCE_ID "faders_uplink"
 #define PORTAL_URL "https://faders.tv/portal/"
 #define DOWNLOAD_URL "https://faders.tv/streamers/#download"
-// Production hub. The key alone identifies the channel, so streamers only paste their key; the
-// server stays editable (Advanced) for testing against another hub.
+// Production hub. The key alone identifies the channel, so streamers only paste their key. The
+// server isn't shown in the settings; tests point it elsewhere through faders_configure.
 #define DEFAULT_SERVER "wss://hub.faders.tv/ingest"
 
 static obs_source_t *settings_source; // private, never shown in a scene
@@ -93,7 +93,7 @@ static void status_text(struct dstr *out)
 	fdr_uplink_status st;
 	get_status(&st);
 	if (!st.running)
-		dstr_copy(out, streaming ? "Not running. Check the server and key." : "Idle. Starts when you go live.");
+		dstr_copy(out, streaming ? "Not running. Check your key." : "Idle. Starts when you go live.");
 	else if (!st.connected)
 		dstr_printf(out, "Connecting… %s", st.last_error[0] ? st.last_error : "");
 	else if (st.listeners == 0)
@@ -157,18 +157,17 @@ static obs_properties_t *src_properties(void *data)
 	get_status(&now);
 	if (now.update_available[0]) {
 		struct dstr label = {0};
-		dstr_printf(&label, "Update available: Faders %s (you have %s). Download", now.update_available, FDR_VERSION_STR);
-		obs_property_t *upd = obs_properties_add_button(props, "update", label.array, NULL);
-		obs_property_button_set_type(upd, OBS_BUTTON_URL);
-		obs_property_button_set_url(upd, DOWNLOAD_URL);
+		dstr_printf(&label, "Update available: Faders %s (you have %s). <a href=\"%s\">Download it</a>", now.update_available, FDR_VERSION_STR, DOWNLOAD_URL);
+		obs_property_t *upd = obs_properties_add_text(props, "update", label.array, OBS_TEXT_INFO);
+		obs_property_text_set_info_type(upd, OBS_TEXT_INFO_WARNING);
 		dstr_free(&label);
 	}
 
 	obs_properties_add_bool(props, "enabled", "Send Faders layers");
 	obs_properties_add_text(props, "key", "Key", OBS_TEXT_PASSWORD);
-	obs_property_t *portal = obs_properties_add_button(props, "portal", "Get your key from the Faders portal", NULL);
-	obs_property_button_set_type(portal, OBS_BUTTON_URL);
-	obs_property_button_set_url(portal, PORTAL_URL);
+	// An info row renders as a QLabel with external links enabled: a real hyperlink that opens the
+	// browser directly (a URL button asks "Open this URL?" first).
+	obs_properties_add_text(props, "portal", "<a href=\"" PORTAL_URL "\">Open the Faders portal to get key</a>", OBS_TEXT_INFO);
 
 	obs_properties_t *tracks = obs_properties_create();
 	add_track_list(tracks, "track_voice", "Voice");
@@ -177,10 +176,6 @@ static obs_properties_t *src_properties(void *data)
 	obs_properties_add_group(props, "tracks", "Audio tracks (assign sources in Edit → Advanced Audio Properties)", OBS_GROUP_NORMAL, tracks);
 
 	obs_properties_add_bool(props, "only_live", "Only send while streaming");
-
-	obs_properties_t *advanced = obs_properties_create();
-	obs_properties_add_text(advanced, "server", "Server", OBS_TEXT_DEFAULT);
-	obs_properties_add_group(props, "advanced", "Advanced", OBS_GROUP_NORMAL, advanced);
 	return props;
 }
 

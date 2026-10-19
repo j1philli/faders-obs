@@ -5,6 +5,9 @@
 # Windows, scripts/cross-windows.sh to cross-compile the Windows DLL from macOS).
 cmake_minimum_required(VERSION 3.24)
 project(faders VERSION 0.1.1 LANGUAGES C)
+# Plugin Manager metadata (OBS 32+ reads data/manifest.json): written from the project version so
+# it can't drift; committed so the installers, which package data/, always include it.
+configure_file("${CMAKE_SOURCE_DIR}/cmake/manifest.json.in" "${CMAKE_SOURCE_DIR}/data/manifest.json" @ONLY NEWLINE_STYLE UNIX)
 
 set(OBS_VERSION "32.2.2" CACHE STRING "OBS Studio version to build against")
 set(OBS_SRC "${CMAKE_SOURCE_DIR}/.deps/obs-studio-src" CACHE PATH "obs-studio source (headers)")

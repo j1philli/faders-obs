@@ -10,9 +10,11 @@ viewers can mix them. Your Twitch stream is not touched.
 [Faders portal](https://faders.tv/portal/). Setup guide: [faders.tv/docs/streamer-setup](https://faders.tv/docs/streamer-setup/).
 
 - **Tools → Faders** opens the settings (OBS's own properties window, no custom UI code):
-  key, which mixer track is voice / game / music, "only send while streaming". The server
-  defaults to `wss://hub.faders.tv/ingest` (the key identifies the channel); it's editable under
-  *Advanced* for testing against another hub.
+  key (with a link to the portal to get one), which mixer track is voice / game / music, "only
+  send while streaming". The server is `wss://hub.faders.tv/ingest` (the key identifies the
+  channel); tests point it elsewhere with the `faders_configure` procedure.
+- OBS 32+ shows Faders and its version in **Tools → Plugin Manager** (`data/manifest.json`,
+  written from the project version by CMake).
 - Taps OBS mixer tracks with `obs_add_raw_audio_callback` (default tracks 2/3/4). Assign
   sources in *Edit → Advanced Audio Properties*.
 - Opus 64 kbps, 20 ms frames, 500 ms chunks (`PROTOCOL.md`). ~190 kbps total upload,
