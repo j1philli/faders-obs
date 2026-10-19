@@ -30,9 +30,15 @@ typedef struct fdr_uplink_status {
 	unsigned long long chunks_sent;
 	char last_error[160];
 	char update_available[24]; // newer published version the hub told us about, or ""
+	int stream_track;          // OBS track the stream's audio encoder uses (1-6), 0 when not watched
+	bool stream_track_silent;  // that track has been silent for a while although our tracks aren't
 
 } fdr_uplink_status;
 
 fdr_uplink_t *fdr_uplink_start(const fdr_uplink_config *cfg);
 void fdr_uplink_stop(fdr_uplink_t *u);
 void fdr_uplink_get_status(fdr_uplink_t *u, fdr_uplink_status *out);
+// Watch the level of the track OBS streams (1-6; 0 stops). If it stays silent while the Faders
+// tracks have sound, the stream reaching viewers has no audio (a common track-setup mistake) and
+// the extension can't sync: the status says so and the hub is told, for the portal.
+void fdr_uplink_watch_stream_track(fdr_uplink_t *u, int track);

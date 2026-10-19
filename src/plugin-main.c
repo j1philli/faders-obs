@@ -57,6 +57,18 @@ static bool should_run(obs_data_t *s)
 	return streaming || !obs_data_get_bool(s, "only_live");
 }
 
+// The track (1-6) the stream's audio encoder mixes from; 0 when not streaming (or headless).
+static int stream_audio_track(void)
+{
+	obs_output_t *out = obs_frontend_get_streaming_output();
+	if (!out)
+		return 0;
+	obs_encoder_t *enc = obs_output_get_audio_encoder(out, 0);
+	int track = enc ? (int)obs_encoder_get_mixer_index(enc) + 1 : 0;
+	obs_output_release(out);
+	return track;
+}
+
 static void apply(obs_data_t *s)
 {
 	pthread_mutex_lock(&uplink_mu);
@@ -70,6 +82,8 @@ static void apply(obs_data_t *s)
 				   (int)obs_data_get_int(s, "track_music")},
 		};
 		uplink = fdr_uplink_start(&cfg);
+		if (streaming)
+			fdr_uplink_watch_stream_track(uplink, stream_audio_track());
 	}
 	pthread_mutex_unlock(&uplink_mu);
 }
@@ -96,6 +110,8 @@ static void status_text(struct dstr *out)
 		dstr_copy(out, streaming ? "Not running. Check your key." : "Idle. Starts when you go live.");
 	else if (!st.connected)
 		dstr_printf(out, "Connecting… %s", st.last_error[0] ? st.last_error : "");
+	else if (st.stream_track_silent)
+		dstr_printf(out, "Connected, but Track %d (what OBS streams) is silent: viewers hear nothing.", st.stream_track);
 	else if (st.listeners == 0)
 		dstr_copy(out, "Connected. Paused until a viewer turns Faders on.");
 	else
@@ -151,6 +167,21 @@ static obs_properties_t *src_properties(void *data)
 	obs_property_t *st = obs_properties_add_text(props, "status_info", status.array, OBS_TEXT_INFO);
 	obs_property_text_set_info_type(st, OBS_TEXT_INFO_NORMAL);
 	dstr_free(&status);
+
+	fdr_uplink_status now_st;
+	get_status(&now_st);
+	if (now_st.stream_track_silent) {
+		struct dstr warn = {0};
+		dstr_printf(&warn,
+			    "Twitch is getting no audio: Track %d, the one OBS streams, is silent. In Edit → Advanced "
+			    "Audio Properties, tick Track %d for your mic, game and music as well as their Faders track. "
+			    "<a href=\"https://faders.tv/docs/obs-tracks/\">How to set up tracks</a>",
+			    now_st.stream_track, now_st.stream_track);
+		obs_property_t *w = obs_properties_add_text(props, "stream_silent", warn.array, OBS_TEXT_INFO);
+		obs_property_text_set_info_type(w, OBS_TEXT_INFO_ERROR);
+		obs_property_text_set_info_word_wrap(w, true);
+		dstr_free(&warn);
+	}
 
 	// The hub says when a newer release is out; the link always goes to faders.tv.
 	fdr_uplink_status now;
@@ -235,6 +266,14 @@ static void on_frontend_event(enum obs_frontend_event event, void *unused)
 // ── Scripting / automation procedures (also used by the headless test) ──────────────────
 // faders_configure(server, key, voice, game, music, only_live) · faders_status(out status)
 
+static void proc_watch_stream_track(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(data);
+	pthread_mutex_lock(&uplink_mu);
+	fdr_uplink_watch_stream_track(uplink, (int)calldata_int(cd, "track"));
+	pthread_mutex_unlock(&uplink_mu);
+}
+
 static void proc_configure(void *unused, calldata_t *cd)
 {
 	UNUSED_PARAMETER(unused);
@@ -274,6 +313,8 @@ bool obs_module_load(void)
 	obs_data_release(saved);
 
 	proc_handler_t *ph = obs_get_proc_handler();
+	// Headless tests have no streaming output: point the streamed-track check at a track directly.
+	proc_handler_add(ph, "void faders_watch_stream_track(in int track)", proc_watch_stream_track, NULL);
 	proc_handler_add(ph, "void faders_configure(in string server, in string key, in int voice, in int game, in int music, in bool only_live)", proc_configure, NULL);
 	proc_handler_add(ph, "void faders_status(out string status)", proc_status, NULL);
 

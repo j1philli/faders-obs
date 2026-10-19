@@ -36,6 +36,10 @@
 #define PROTOCOL_VERSION 1
 #define PING_EVERY_NS 20000000000ULL    // heartbeat while connected
 #define SILENCE_LIMIT_NS 60000000000ULL // nothing from the hub for this long: reconnect
+// Stream-track check: silent means below -80 dBFS; "has sound" means above -60 dBFS.
+#define STREAM_SOUND_PEAK 0.0001f
+#define STEM_SOUND_PEAK 0.001f
+#define STREAM_SILENT_NS 10000000000ULL
 
 struct ring {
 	float buf[RING_SAMPLES];
@@ -90,9 +94,29 @@ struct fdr_uplink {
 	size_t window_bytes;
 	fdr_uplink_status status;
 
+	// Stream-track check (fdr_uplink_watch_stream_track). Times are os_gettime_ns.
+	struct tap stream_tap; // stem = -1
+	bool watching_stream;
+	uint64_t watch_start_ns;
+	uint64_t stream_heard_ns; // last time the streamed track had sound
+	uint64_t stems_heard_ns;  // last time any Faders track had sound
+	bool stream_status_dirty; // tell the hub (again): changed, or reconnected
+
 	pthread_t thread;
 	os_event_t *stop_event;
 };
+
+static float peak_of(const struct audio_data *data)
+{
+	const float *s = (const float *)data->data[0];
+	float peak = 0.0f;
+	for (uint32_t i = 0; i < data->frames; i++) {
+		float v = s[i] < 0 ? -s[i] : s[i];
+		if (v > peak)
+			peak = v;
+	}
+	return peak;
+}
 
 // ── Audio thread: copy mixer output into per-stem rings ─────────────────────────────────
 
@@ -129,7 +153,48 @@ static void on_audio(void *param, size_t mix_idx, struct audio_data *data)
 		u->start_ts = data->timestamp + 50000000ULL;
 	if (data->timestamp >= u->start_ts)
 		ring_push(&u->rings[t->stem], (const float *)data->data[0], data->frames);
+	if (u->watching_stream && peak_of(data) > STEM_SOUND_PEAK)
+		u->stems_heard_ns = os_gettime_ns();
 	pthread_mutex_unlock(&u->mu);
+}
+
+// The streamed track: only its level is used.
+static void on_stream_audio(void *param, size_t mix_idx, struct audio_data *data)
+{
+	UNUSED_PARAMETER(mix_idx);
+	struct fdr_uplink *u = ((struct tap *)param)->u;
+	if (peak_of(data) <= STREAM_SOUND_PEAK)
+		return;
+	pthread_mutex_lock(&u->mu);
+	u->stream_heard_ns = os_gettime_ns();
+	pthread_mutex_unlock(&u->mu);
+}
+
+// Worker thread. Decides whether the streamed track is silent and tells the hub when that changes.
+static void check_stream_track(struct fdr_uplink *u, uint64_t now)
+{
+	pthread_mutex_lock(&u->mu);
+	bool silent = u->watching_stream && now - u->watch_start_ns >= STREAM_SILENT_NS &&
+		      now - u->stream_heard_ns >= STREAM_SILENT_NS && now - u->stems_heard_ns < STREAM_SILENT_NS;
+	if (silent != u->status.stream_track_silent) {
+		u->status.stream_track_silent = silent;
+		u->stream_status_dirty = true;
+		if (silent)
+			blog(LOG_WARNING, "[faders] Track %d, which OBS streams, is silent while the Faders tracks have sound: viewers hear nothing and the extension can't sync. Tick Track %d for your sources in Edit → Advanced Audio Properties.", u->status.stream_track, u->status.stream_track);
+		else
+			blog(LOG_INFO, "[faders] Track %d is no longer flagged as silent", u->status.stream_track);
+	}
+	bool send = u->stream_status_dirty && u->ws && u->connected && u->watching_stream;
+	if (send)
+		u->stream_status_dirty = false;
+	char msg[96];
+	snprintf(msg, sizeof(msg), "{\"type\":\"status\",\"streamAudio\":\"%s\",\"track\":%d}", silent ? "silent" : "ok", u->status.stream_track);
+	pthread_mutex_unlock(&u->mu);
+	if (send && !fdr_ws_send_text(u->ws, msg)) {
+		pthread_mutex_lock(&u->mu);
+		u->stream_status_dirty = true;
+		pthread_mutex_unlock(&u->mu);
+	}
 }
 
 // ── Network ─────────────────────────────────────────────────────────────────────────────
@@ -150,6 +215,7 @@ static void on_open(void *param)
 	u->last_sent_seq = -1; // the hub may have restarted: offer everything we still hold
 	u->conn_gen++;
 	u->status.last_error[0] = 0;
+	u->stream_status_dirty = true; // a (re)connected hub hasn't heard it
 	pthread_mutex_unlock(&u->mu);
 	blog(LOG_INFO, "[faders] connected to %s", u->server);
 }
@@ -338,6 +404,7 @@ static void *worker(void *param)
 		uint64_t now = os_gettime_ns();
 		encode_ready(u);
 		maintain_connection(u, now);
+		check_stream_track(u, now);
 		flush(u);
 		if (now - u->window_start_ns >= 5000000000ULL) {
 			pthread_mutex_lock(&u->mu);
@@ -391,6 +458,7 @@ void fdr_uplink_stop(fdr_uplink_t *u)
 		return;
 	for (int s = 0; s < STEMS; s++)
 		obs_remove_raw_audio_callback(u->taps[s].mix_idx, on_audio, &u->taps[s]);
+	fdr_uplink_watch_stream_track(u, 0);
 	os_event_signal(u->stop_event);
 	pthread_join(u->thread, NULL);
 	fdr_ws_destroy(u->ws);
@@ -417,4 +485,34 @@ void fdr_uplink_get_status(fdr_uplink_t *u, fdr_uplink_status *out)
 	out->connected = u->connected;
 	out->listeners = u->listeners;
 	pthread_mutex_unlock(&u->mu);
+}
+
+void fdr_uplink_watch_stream_track(fdr_uplink_t *u, int track)
+{
+	if (!u)
+		return;
+	if (u->watching_stream) {
+		obs_remove_raw_audio_callback(u->stream_tap.mix_idx, on_stream_audio, &u->stream_tap);
+		pthread_mutex_lock(&u->mu);
+		u->watching_stream = false;
+		u->status.stream_track = 0;
+		u->status.stream_track_silent = false;
+		pthread_mutex_unlock(&u->mu);
+	}
+	if (track < 1 || track > 6)
+		return;
+	uint64_t now = os_gettime_ns();
+	pthread_mutex_lock(&u->mu);
+	u->stream_tap = (struct tap){u, -1, (size_t)(track - 1)};
+	u->watching_stream = true;
+	u->watch_start_ns = now;
+	u->stream_heard_ns = now;
+	u->stems_heard_ns = 0;
+	u->status.stream_track = track;
+	u->stream_status_dirty = true;
+	pthread_mutex_unlock(&u->mu);
+	// Mono float like the stems; only the level is read.
+	struct audio_convert_info conv = {.samples_per_sec = SAMPLE_RATE, .format = AUDIO_FORMAT_FLOAT, .speakers = SPEAKERS_MONO};
+	obs_add_raw_audio_callback(u->stream_tap.mix_idx, &conv, on_stream_audio, &u->stream_tap);
+	blog(LOG_INFO, "[faders] watching Track %d (streamed audio) for silence", track);
 }

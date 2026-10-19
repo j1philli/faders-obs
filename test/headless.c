@@ -198,6 +198,13 @@ int main(int argc, char **argv)
 	calldata_set_int(&cd, "music", 4);
 	calldata_set_bool(&cd, "only_live", false);
 	proc_handler_call(obs_get_proc_handler(), "faders_configure", &cd);
+	// FADERS_STREAM_TRACK=n: run the streamed-track silence check on track n (no streaming output here).
+	if (getenv("FADERS_STREAM_TRACK")) {
+		calldata_t wc = {0};
+		calldata_set_int(&wc, "track", atoi(getenv("FADERS_STREAM_TRACK")));
+		proc_handler_call(obs_get_proc_handler(), "faders_watch_stream_track", &wc);
+		calldata_free(&wc);
+	}
 	calldata_free(&cd);
 
 	for (int t = 0; t < seconds; t++) {
