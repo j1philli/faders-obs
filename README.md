@@ -2,28 +2,37 @@
 
 A plugin for [OBS Studio](https://obsproject.com). Faders isn't affiliated with or endorsed by the OBS Project.
 
-Sends your **voice**, **game** and **music** as separate layers (plus **Everything else**, whatever
-is on your stream but not on those tracks: alerts, transitions) to the Faders hub so
-viewers can mix them. Your Twitch stream is not touched.
+Sends your audio as separate layers (faders) to the Faders hub so viewers can mix them: by
+default **Voice**, **Game** and **Music**, named and numbered as you like (your plan sets how
+many), plus **Everything else** (whatever is on your stream but in no fader: alerts,
+transitions). Your Twitch stream is not touched.
 
 **Get it:** download the installer from [faders.tv/streamers](https://faders.tv/streamers/) or the
 [latest release](https://github.com/j1philli/faders-obs/releases/latest), and get your key from the
 [Faders portal](https://faders.tv/portal/). Setup guide: [faders.tv/docs/streamer-setup](https://faders.tv/docs/streamer-setup/).
 
 - **Tools → Faders** opens the settings (OBS's own properties window, no custom UI code):
-  key (with a link to the portal to get one), which three mixer tracks viewers can control, "only
-  send while streaming". The server is `wss://hub.faders.tv/ingest` (the key identifies the
-  channel); tests point it elsewhere with the `faders_configure` procedure.
-- **Track names (0.3.0+):** rename your audio tracks under **Track names** in the [portal](https://faders.tv/portal/).
-  The hub sends the same labels to viewers and this plugin. **Tools → Faders → Audio tracks**
-  refreshes while open and remembers labels when disconnected. Names change display labels only;
-  track assignments and the three audio stem IDs stay the same.
-- **Tools → Faders** shows the installed version at the bottom. OBS 32+ also shows it in
-  **Tools → Plugin Manager** (`data/manifest.json`, written from the project version by CMake).
-- Taps OBS mixer tracks with `obs_add_raw_audio_callback` (default tracks 2/3/4). Assign
-  sources in *Edit → Advanced Audio Properties*.
-- Stereo Opus at 128 kbps per track (at least Twitch's ~160 kbps stereo AAC), 20 ms frames,
-  500 ms chunks (`PROTOCOL.md`). Up to ~390 kbps total upload (less for quiet or mono tracks),
+  key (with a link to the portal to get one), the **Faders** list (names, in order; "Your plan
+  includes N faders"), **Sources** (one dropdown per audio source: a fader, "Everything else", or
+  "Auto (→ X)" from the rule table in `PROTOCOL.md`), and under **Advanced** the mixer mode and
+  "only send while streaming". The server is `wss://hub.faders.tv/ingest` (the key identifies
+  the channel); tests point it elsewhere with the `faders_configure*` procedures.
+- **Sources mode** (default since 0.4.0, `src/mixer.c`): no OBS tracks are used. The plugin
+  mixes each fader itself from the sources' own audio (what OBS already applied: volume, mute,
+  push-to-talk, sync offset, scene visibility, transitions) and sends Everything else = the
+  streamed track minus the faders, so what viewers hear adds up to the stream exactly. Needs
+  stereo 48 kHz OBS audio (else that session falls back to tracks mode with a notice) and
+  OBS 30+. Assignments live with each source (private setting `faders_fader`), so they travel
+  with the scene collection. A source whose audio turns up in Everything else although it was
+  included (an oracle on the residual) is moved there for the session and reported.
+- **Tracks mode** (legacy, Advanced → Mixer): voice / game / music are OBS mixer tracks (default
+  2/3/4) assigned in *Edit → Advanced Audio Properties*. A 0.3.x install is migrated to sources
+  mode on first run: each source's track becomes its fader assignment (logged).
+- **Tools → Faders** shows the installed version under Advanced. OBS 32+ also shows it in **Tools → Plugin Manager** (`data/manifest.json`,
+  written from the project version by CMake).
+- Stereo Opus at 128 kbps per layer (at least Twitch's ~160 kbps stereo AAC), 20 ms frames,
+  500 ms chunks (`PROTOCOL.md`); a layer that is silent for a chunk costs nothing. About
+  128 kbps per layer of upload (less for quiet layers),
   and **0 while nobody is listening**: the hub tells the plugin its listener count, the
   plugin keeps a 60 s backlog and replays it when the first listener arrives.
 - The key goes in an `Authorization: Bearer` header. Reconnects back off 1 s → 30 s, so a wrong
@@ -31,11 +40,13 @@ viewers can mix them. Your Twitch stream is not touched.
 - Heartbeat: pings the hub every 20 s and reconnects after 60 s without a reply, so a connection
   silently dropped by a router or proxy recovers on its own.
 - When the hub reports a newer release, **Tools → Faders** shows "Update available" with a link
-  to the download page, until you install that version. The hub only says so while the plugin
-  is connected (by default, while you're live), so the plugin remembers it and opens Tools →
-  Faders once at OBS's next start. The plugin never updates itself.
-- Scriptable: procedures `faders_configure(server, key, voice, game, music, only_live)` and
-  `faders_status(out status)` on the global proc handler.
+  to the download page. The plugin never updates itself.
+- Scriptable, on the global proc handler: `faders_configure(server, key, voice, game, music,
+  only_live)` (tracks mode), `faders_configure_sources(server, key, faders, only_live)` (sources
+  mode; `faders` = "Voice,Game,Music,Discord"), `faders_assign(source, fader)` (a fader name,
+  "" for Everything else, "auto"), `faders_watch_stream_track(track)`,
+  `faders_transition_duration(ms)`, `faders_rebuild()`, `faders_status(out status)` and
+  `faders_mixer_stats(out json)` (levels per fader and residual, gate decisions, timing).
 
 ## One plugin, two platforms
 
@@ -118,7 +129,9 @@ node test/plugin-listener.mjs --channel ci_channel --seconds 20   # PASS/FAIL
 ### Headless host
 
 `build/faders-headless` runs real libobs, plays three WAVs into tracks 2/3/4, loads the plugin
-and configures it through its procedures:
+and configures it through its procedures (tracks mode). `build/faders-mixtest <server> <key>`
+does the same in sources mode with tone sources and checks every mixing case (`PROTOCOL.md`,
+"Sources mode"); `build/faders-mixcheck` proves the libobs facts it relies on, without the plugin:
 
 ```sh
 build/faders-headless ws://localhost:8787/ingest/<channel> <fdr_live_key> \

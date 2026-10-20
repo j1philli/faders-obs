@@ -4,7 +4,7 @@
 # Dependencies live in .deps/ (scripts/fetch-deps.sh on macOS, scripts/fetch-deps-windows.ps1 on
 # Windows, scripts/cross-windows.sh to cross-compile the Windows DLL from macOS).
 cmake_minimum_required(VERSION 3.24)
-project(faders VERSION 0.3.1 LANGUAGES C)
+project(faders VERSION 0.4.0 LANGUAGES C)
 # Plugin Manager metadata (OBS 32+ reads data/manifest.json): written from the project version so
 # it can't drift; committed so the installers, which package data/, always include it.
 configure_file("${CMAKE_SOURCE_DIR}/cmake/manifest.json.in" "${CMAKE_SOURCE_DIR}/data/manifest.json" @ONLY NEWLINE_STYLE UNIX)
@@ -20,7 +20,7 @@ set(GEN "${CMAKE_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${GEN}")
 file(WRITE "${GEN}/obsconfig.h" "#pragma once\n#define OBS_RELEASE_CANDIDATE 0\n#define OBS_BETA 0\n")
 
-set(FADERS_SOURCES src/plugin-main.c src/uplink.c)
+set(FADERS_SOURCES src/plugin-main.c src/uplink.c src/mixer.c)
 set(OBS_INCLUDES "${GEN}" "${OBS_SRC}/libobs" "${OBS_SRC}/frontend/api" "${SIMDE_INCLUDE}")
 
 if(APPLE)
@@ -126,3 +126,19 @@ else()
     target_compile_options(faders-mixcheck PRIVATE ${MINGW_SHIM})
   endif()
 endif()
+
+# Mixer test: the virtual mixer (sources mode) through the real plugin (test/mixtest.c).
+add_executable(faders-mixtest test/mixtest.c)
+target_include_directories(faders-mixtest PRIVATE ${OBS_INCLUDES})
+target_compile_definitions(faders-mixtest PRIVATE FADERS_PLUGIN_BIN="${PLUGIN_BIN}" FADERS_PLUGIN_DATA="${PLUGIN_DATA}" FADERS_GRAPHICS_MODULE="${GRAPHICS_MODULE}" FADERS_OBS_TRANSITIONS_BIN="${OBS_TRANSITIONS_BIN}" FADERS_OBS_TRANSITIONS_DATA="${OBS_TRANSITIONS_DATA}")
+if(APPLE)
+  target_link_options(faders-mixtest PRIVATE "-F${FRAMEWORKS}" "-Wl,-rpath,${FRAMEWORKS}")
+  target_link_libraries(faders-mixtest PRIVATE "-framework libobs")
+else()
+  target_link_libraries(faders-mixtest PRIVATE ${OBS_IMPORT_LIBS})
+  if(NOT MSVC)
+    target_link_options(faders-mixtest PRIVATE -static-libgcc -static)
+    target_compile_options(faders-mixtest PRIVATE ${MINGW_SHIM})
+  endif()
+endif()
+add_dependencies(faders-mixtest faders)

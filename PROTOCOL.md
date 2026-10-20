@@ -5,11 +5,11 @@ All binary fields little-endian. One binary WebSocket message = one chunk (500 m
 ```
 offset size field
 0      1    version      (1)
-1      1    stemCount    (3, or 4 with "Everything else"; up to 16)
+1      1    stemCount    (up to 16: the configured faders + "Everything else"; 3 or 4 in tracks mode)
 2      4    seq          u32, increments by 1 per chunk
 6      8    tsMs         f64, stream clock of the chunk's first sample
 14     2    frameMs      u16, Opus frame duration (20)
-16     ...  per stem:    u8 stemId (0 voice, 1 game, 2 music, 3 everything else)
+16     ...  per stem:    u8 stemId (the index in the plugin's stems message; 0 voice, 1 game, 2 music, 3 everything else in tracks mode)
                          u16 nFrames (25, or 0: this stem is silent for the whole chunk)
                          nFrames × (u16 len, len bytes raw Opus packet)
 ```
@@ -23,10 +23,10 @@ Text (JSON) control messages:
 | Direction        | Message                                                      | Meaning                                   |
 |------------------|--------------------------------------------------------------|-------------------------------------------|
 | hub → plugin     | `{"type":"listeners","n":3}`                                 | listener count; plugin pauses uplink at 0 |
-| hub → plugin     | `{"type":"quality","kbps":192,"maxStems":4}`                 | kbps per track (plan-capped); default 128. `maxStems`: layers the plan allows (plugin 0.3.0+ reads it; it only matters once layers are configurable) |
+| hub → plugin     | `{"type":"quality","kbps":192,"maxStems":4}`                 | kbps per stem (plan-capped); default 128. `maxStems`: faders the plan allows, not counting Everything else (plugin 0.4.0+ folds faders past it into Everything else; 0.3.0 only reads it) |
 | hub → plugin     | `{"type":"update","latest":"0.3.0"}`                         | a newer plugin release is published       |
 | plugin → hub     | `{"type":"stems","stems":[{"id":0,"name":"Voice"},…,{"id":3,"name":"Everything else","rest":true}]}` | the stem list, on every connect and whenever it changes, before any chunk with that layout. `rest` marks the residual (the streamed track minus the other stems). Without it (plugins ≤ 0.2) the list is voice/game/music, ids 0–2 |
-| plugin → hub     | `{"type":"status","streamAudio":"ok"|"silent","track":1,"mixMismatch":"game"}` | the track OBS streams: silent while the Faders tracks have sound (0.1.1+); `mixMismatch` (0.3.0+): that layer is sent to Faders but is not in the streamed track (omitted when fine) |
+| plugin → hub     | `{"type":"status","streamAudio":"ok"|"silent","track":1,"mixMismatch":"game"}` | the track OBS streams: silent while the Faders layers have sound (0.1.1+); `mixMismatch` (0.3.0+): a layer (tracks mode) or a source name (sources mode, 0.4.0+) sent to Faders that isn't in the streamed track (omitted when fine) |
 | hub → listener   | `{"type":"stems",…}`                                         | the plugin's stem list, on attach (before `backlog`) and when it changes |
 | hub → listener   | `{"type":"backlog","count":120}`                             | next `count` binary chunks are history    |
 | hub → listener   | `{"type":"live"}`                                            | following chunks are live                 |
@@ -104,3 +104,47 @@ runs headless with synthetic tone sources and fails the build if any check fails
 Phase 3 therefore uses `obs_source_get_audio_mix()` from the track raw callback (not the
 capture-callback fallback), with the timestamp rule above for alignment and `obs_source_active`
 + track bits + `audio_pending` as the gate.
+
+## Sources mode (plugin 0.4.0): how the mixer works
+
+`src/mixer.c`. One raw audio callback on the track OBS streams (float planar, 48 kHz stereo,
+`allow_clipping`). Per tick, for every audio input source in the collection (a snapshot the main
+thread rebuilds on source create/destroy/rename/load, output-channel changes and frontend
+events; the audio thread takes a strong reference per source per tick):
+
+1. Gate: `obs_source_active()`, the source's track bits include the streamed track, not
+   Monitor Only, not `obs_source_audio_pending()`, `obs_source_get_audio_timestamp()` ≈ tick end
+   now and ≈ tick start at the previous tick. Anything gated out contributes nothing (if the
+   stream has it, the residual carries it).
+2. Gain: 1, or during a transition the per-sample crossfade (A × (1 − t), B × t with
+   t = (sample_ts − start) / duration; start from the transition's `transition_start` signal,
+   duration from the frontend's setting, `faders_transition_duration` headless, or learned from
+   the last fade; kept clamped until `transition_stop`). Fixed-length transitions (stingers) are
+   not modelled: their audio is the transition's own and lands in Everything else. A source on
+   both sides, or appearing twice in the tree, gets gain 1 (libobs mixes it once).
+3. Sum into its fader (`faders_fader` private setting by name; absent = the rule table;
+   "" = Everything else; faders past the plan's `maxStems` fold into Everything else).
+4. Everything else = unclamped track − Σ faders. Σ(all stems) == the streamed track exactly.
+5. Oracle: per ~0.5 s window, the residual correlated with each included source's
+   contribution; |r| > 0.5 three windows in a row means the source isn't in the stream the
+   way it was included (gating bug, double capture…): it is moved to Everything else for the
+   session, logged, shown in Tools → Faders and reported as `mixMismatch` with the source name.
+
+Measured (test/mixtest.c, CI target `faders-mixtest`, libobs 32.2.2, Apple M3 Pro): every
+fader exact and Everything else == the unassigned source (±3 %); mute and a 200 ms push-to-talk
+release land on the tick; hidden / preview-only / Monitor Only / off-track sources excluded with
+nothing leaking; 300 ms fade residual −72 dBFS during the fade (−154 after); sync offset +200 ms
+aligned; a duplicated source counted once; two dozen sources p50 42–52 µs, p99 230–320 µs per 21 ms tick;
+plan cap folds faders (hub `maxStems` 2 → 2 + Everything else on the wire); an injected
+mismatch dropped after 1.3 s.
+
+Rule table for automatic assignment (first match; a fader that isn't configured falls back as
+noted): mic inputs (`wasapi_input_capture`, `coreaudio_input_capture`, `pulse_input_capture`,
+`alsa_input_capture`) → Voice; app audio capture (`wasapi_process_output_capture`,
+`sck_audio_capture`, pipewire app capture) whose name/app/window mentions discord, teamspeak,
+slack, zoom, skype or mumble → Discord (else Voice); app capture or media sources
+(`ffmpeg_source`, `vlc_source`, `slideshow`) mentioning spotify, apple music, tidal, foobar,
+deezer, youtube music, "music" or "playlist" → Music; `browser_source` or anything mentioning
+alert, streamelements, streamlabs or sound alert → Alerts (else Everything else); other app
+capture, media, desktop audio (`wasapi_output_capture`, `coreaudio_output_capture`,
+`pulse_output_capture`), game/window/display capture → Game; everything else → Everything else.
