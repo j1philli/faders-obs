@@ -71,11 +71,32 @@ wait $HOST || true
 grep -q '"mixMismatch":"game"' hub.log || { tail -5 hub.log; echo "##teamcity[buildProblem description='the plugin did not report the game track missing from the streamed track']"; exit 1; }
 grep -q '"mixMismatch":"voice"\|"mixMismatch":"music"' hub.log && { echo "##teamcity[buildProblem description='mixMismatch named a stem that is on the streamed track']"; exit 1; }
 
+# Sources mode (the virtual mixer, 0.4.0): every case of the mixing matrix through the real
+# plugin (test/mixtest.c), then the wire as a listener sees it (named stems + Everything else).
+build/faders-mixtest "ws://127.0.0.1:$PORT/ingest/mix_channel" dev-token > mixtest.log 2>&1 || { grep -E "^(PASS|FAIL|SKIP)" mixtest.log; echo "##teamcity[buildProblem description='faders-mixtest: a virtual-mixer case failed']"; exit 1; }
+grep -E "^(PASS|FAIL|SKIP)" mixtest.log
+grep -q '"mixMismatch":"injected"' hub.log || { echo "##teamcity[buildProblem description='the injected mismatch was not reported to the hub']"; exit 1; }
+build/faders-mixtest "ws://127.0.0.1:$PORT/ingest/mix_wire" dev-token wire > mixtest-wire.log 2>&1 &
+HOST=$!
+sleep 5
+node test/plugin-listener.mjs --server "ws://127.0.0.1:$PORT" --channel mix_wire --seconds 12 --stems 5 --names "Voice,Game,Music,Discord,rest" --rest-audible
+wait $HOST || true
+
+# The plan's allowance folds extra faders into Everything else (mock hub: maxStems 2).
+F_PORT=$((PORT + 2))
+node test/mock-hub.mjs --port "$F_PORT" --kbps 128 --max-stems 2 > hub-fold.log 2>&1 &
+FHUB=$!
+trap 'kill $HUB $FHUB ${HOST:-} 2>/dev/null || true' EXIT
+for _ in $(seq 1 30); do curl -s "localhost:$F_PORT/health" | grep -q ok && break; sleep 1; done
+build/faders-mixtest "ws://127.0.0.1:$F_PORT/ingest/mix_fold" dev-token fold > mixtest-fold.log 2>&1 || { grep -E "^(PASS|FAIL|SKIP)" mixtest-fold.log; echo "##teamcity[buildProblem description='faders-mixtest: the plan cap did not fold faders']"; exit 1; }
+grep -E "^(PASS|FAIL|SKIP)" mixtest-fold.log
+kill $FHUB 2>/dev/null || true
+
 # The hub sets the channel's audio quality; the plugin follows it.
 Q_PORT=$((PORT + 1))
 node test/mock-hub.mjs --port "$Q_PORT" --kbps 256 > hub-quality.log 2>&1 &
 QHUB=$!
-trap 'kill $HUB $QHUB ${HOST:-} ${QHOST:-} 2>/dev/null || true' EXIT
+trap 'kill $HUB $QHUB ${FHUB:-} ${HOST:-} ${QHOST:-} 2>/dev/null || true' EXIT
 for _ in $(seq 1 30); do curl -s "localhost:$Q_PORT/health" | grep -q ok && break; sleep 1; done
 build/faders-headless "ws://127.0.0.1:$Q_PORT/ingest/ci_channel" dev-token "$M/voice.wav" "$M/game.wav" "$M/music.wav" 30 > host-quality.log 2>&1 &
 QHOST=$!

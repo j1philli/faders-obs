@@ -3,7 +3,7 @@
 // Listens to a channel on the hub and checks what the OBS plugin sends: well-formed chunks
 // (every announced stem × 25 Opus frames, consecutive seqs) carrying real audio (not silence).
 //   node plugin-listener.mjs --server ws://localhost:8787 --channel <name> [--seconds 20] [--kbps 128]
-//                            [--stems 3] [--rest-audible]
+//                            [--stems 3] [--names voice,game,music,rest] [--rest-audible]
 // --kbps: the per-track bitrate the plugin should be sending (its default, or what the hub asked for).
 // --stems: how many stems the plugin must announce ({"type":"stems"}, before the first live chunk).
 // --rest-audible: the "Everything else" stem must carry audio (the headless host puts a source on
@@ -19,6 +19,8 @@ const { values: args } = parseArgs({
     kbps: { type: "string", default: "128" },
     stems: { type: "string", default: "3" },
     "rest-audible": { type: "boolean", default: false },
+    // The announced names, lower-case, "rest" for the Everything else stem (plugin 0.4.0 sources mode).
+    names: { type: "string" },
   },
 });
 const seconds = Number(args.seconds);
@@ -75,7 +77,8 @@ else if (announced.length !== expectStems) fail.push(`plugin announced ${announc
 else if (!stemsBeforeAudio) fail.push("stems message arrived after the first chunk");
 const names = announced ? announced.map((s) => (s.rest ? "rest" : s.name.toLowerCase())) : ["voice", "game", "music"];
 const restId = announced?.find((s) => s.rest)?.id ?? -1;
-if (expectStems > 3 && restId !== 3) fail.push(`stem 3 should be the rest stem (${JSON.stringify(announced)})`);
+if (expectStems > 3 && restId !== expectStems - 1) fail.push(`the last stem should be the rest stem (${JSON.stringify(announced)})`);
+if (args.names && names.join(",") !== args.names.toLowerCase()) fail.push(`stems announced as ${names.join(",")}, expected ${args.names}`);
 // Every stem is present with 25 frames, or marked silent (0 frames: its whole chunk was below -60 dBFS).
 if (chunks.some((c) => c.stems.length !== expectStems || c.stems.some((s) => s.frames !== 25 && s.frames !== 0))) fail.push(`chunk without ${expectStems} stems × 25 (or 0) frames`);
 const gaps = chunks.slice(1).filter((c, i) => c.seq !== chunks[i].seq + 1).length;
