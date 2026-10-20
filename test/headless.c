@@ -13,6 +13,12 @@
 // its "faders_configure" procedure, and prints the plugin's status every few seconds.
 //
 //   faders-headless <server> <key> <voice.wav> <game.wav> <music.wav> [seconds]
+//
+// Environment, for the stream-track checks (there is no streaming output here):
+//   FADERS_STREAM_TRACK=1   watch track 1 as the streamed track; the three sources also go on it
+//   FADERS_OFF_STREAM=game  ...except this one (voice|game|music): a track-setup mistake
+//   FADERS_EXTRA_WAV=path   a fourth source on the streamed track only (played from its midpoint,
+//                           so it doesn't correlate with the stem it may be a copy of)
 #include <obs.h>
 #include <obs-module.h>
 #include <util/platform.h>
@@ -90,6 +96,7 @@ static void *wav_create(obs_data_t *settings, obs_source_t *source)
 		fprintf(stderr, "cannot read %s\n", obs_data_get_string(settings, "path"));
 		exit(2);
 	}
+	w->pos = (size_t)(obs_data_get_double(settings, "start") * (double)w->count) % (w->count ? w->count : 1);
 	pthread_create(&w->thread, NULL, wav_thread, w);
 	return w;
 }
@@ -209,16 +216,34 @@ int main(int argc, char **argv)
 	}
 	obs_register_source(&wav_info);
 
-	// Voice → track 2, game → track 3, music → track 4 (mixer bit = track - 1).
-	obs_source_t *srcs[3];
+	// Voice → track 2, game → track 3, music → track 4 (mixer bit = track - 1). With a streamed
+	// track under test they are on that track too (as a real setup has them), except the one
+	// FADERS_OFF_STREAM names.
+	int stream_track = getenv("FADERS_STREAM_TRACK") ? atoi(getenv("FADERS_STREAM_TRACK")) : 0;
+	const char *off_stream = getenv("FADERS_OFF_STREAM");
+	obs_source_t *srcs[4] = {0};
+	int n_srcs = 3;
 	for (int i = 0; i < 3; i++) {
 		obs_data_t *s = obs_data_create();
 		obs_data_set_string(s, "path", argv[3 + i]);
 		static const char *names[] = {"voice", "game", "music"};
 		srcs[i] = obs_source_create("faders_test_wav", names[i], s, NULL);
 		obs_data_release(s);
-		obs_source_set_audio_mixers(srcs[i], 1u << (i + 1));
+		uint32_t mixers = 1u << (i + 1);
+		if (stream_track && !(off_stream && strcmp(off_stream, names[i]) == 0))
+			mixers |= 1u << (stream_track - 1);
+		obs_source_set_audio_mixers(srcs[i], mixers);
 		obs_set_output_source(1 + i, srcs[i]); // output channels make the sources active
+	}
+	if (stream_track && getenv("FADERS_EXTRA_WAV")) {
+		obs_data_t *s = obs_data_create();
+		obs_data_set_string(s, "path", getenv("FADERS_EXTRA_WAV"));
+		obs_data_set_double(s, "start", 0.5);
+		srcs[3] = obs_source_create("faders_test_wav", "extra", s, NULL);
+		obs_data_release(s);
+		obs_source_set_audio_mixers(srcs[3], 1u << (stream_track - 1));
+		obs_set_output_source(4, srcs[3]);
+		n_srcs = 4;
 	}
 
 	struct audio_convert_info dbg = {.samples_per_sec = 48000, .format = AUDIO_FORMAT_FLOAT, .speakers = SPEAKERS_MONO};
@@ -241,10 +266,10 @@ int main(int argc, char **argv)
 	calldata_set_int(&cd, "music", 4);
 	calldata_set_bool(&cd, "only_live", false);
 	proc_handler_call(obs_get_proc_handler(), "faders_configure", &cd);
-	// FADERS_STREAM_TRACK=n: run the streamed-track silence check on track n (no streaming output here).
-	if (getenv("FADERS_STREAM_TRACK")) {
+	// FADERS_STREAM_TRACK=n: watch track n as the streamed track (no streaming output here).
+	if (stream_track) {
 		calldata_t wc = {0};
-		calldata_set_int(&wc, "track", atoi(getenv("FADERS_STREAM_TRACK")));
+		calldata_set_int(&wc, "track", stream_track);
 		proc_handler_call(obs_get_proc_handler(), "faders_watch_stream_track", &wc);
 		calldata_free(&wc);
 	}
@@ -262,7 +287,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	for (int i = 0; i < 3; i++) {
+	for (int i = 0; i < n_srcs; i++) {
 		obs_set_output_source(1 + i, NULL);
 		obs_source_release(srcs[i]);
 	}

@@ -8,8 +8,9 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
-// The Faders uplink: taps three OBS mixer tracks, encodes them as Opus, and sends 500 ms chunks
-// to the Faders hub (see PROTOCOL.md). Pauses its upload while nobody is listening.
+// The Faders uplink: taps three OBS mixer tracks (plus the streamed track, whose remainder goes
+// out as "Everything else"), encodes them as Opus, and sends 500 ms chunks to the Faders hub
+// (see PROTOCOL.md). Pauses its upload while nobody is listening.
 #pragma once
 #include <stdbool.h>
 #include <stddef.h>
@@ -36,6 +37,9 @@ typedef struct fdr_uplink_status {
 	char fader_names[3][FDR_NAME_BYTES]; // empty until the hub supplies channel labels
 	int stream_track;          // OBS track the stream's audio encoder uses (1-6), 0 when not watched
 	bool stream_track_silent;  // that track has been silent for a while although our tracks aren't
+	int stems;                 // layers on the wire: 3, or 4 with "Everything else" while the stream track is watched
+	int max_stems;             // layers the channel's plan allows (from the hub); 0 = not told
+	char mix_mismatch[16];     // "voice"/"game"/"music": sent to Faders but missing from the streamed track; "" = fine
 
 } fdr_uplink_status;
 

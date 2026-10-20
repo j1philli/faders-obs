@@ -45,6 +45,31 @@ build/faders-headless "ws://127.0.0.1:$PORT/ingest/ci_channel" dev-token "$M/voi
 HOST=$!
 sleep 6
 node test/plugin-listener.mjs --server "ws://127.0.0.1:$PORT" --channel ci_channel --seconds 20
+wait $HOST || true
+
+# With the streamed track watched, a 4th stem carries "Everything else" = that track minus the
+# three Faders tracks. With every source on both it must be silent (the subtraction is exact)...
+FADERS_STREAM_TRACK=1 build/faders-headless "ws://127.0.0.1:$PORT/ingest/ci_channel" dev-token "$M/voice.wav" "$M/game.wav" "$M/music.wav" 30 > host-rest-silent.log 2>&1 &
+HOST=$!
+sleep 6
+node test/plugin-listener.mjs --server "ws://127.0.0.1:$PORT" --channel ci_channel --seconds 15 --stems 4
+wait $HOST || true
+
+# ...and with a source on the streamed track only, that source is what it carries.
+FADERS_STREAM_TRACK=1 FADERS_EXTRA_WAV="$M/voice.wav" build/faders-headless "ws://127.0.0.1:$PORT/ingest/ci_channel" dev-token "$M/voice.wav" "$M/game.wav" "$M/music.wav" 30 > host-rest.log 2>&1 &
+HOST=$!
+sleep 6
+node test/plugin-listener.mjs --server "ws://127.0.0.1:$PORT" --channel ci_channel --seconds 15 --stems 4 --rest-audible
+wait $HOST || true
+grep -q '"mixMismatch"' hub.log && { echo "##teamcity[buildProblem description='mixMismatch reported although every Faders source is on the streamed track']"; exit 1; }
+
+# A Faders source missing from the streamed track: the plugin reports which one within seconds.
+FADERS_STREAM_TRACK=1 FADERS_OFF_STREAM=game build/faders-headless "ws://127.0.0.1:$PORT/ingest/ci_channel" dev-token "$M/voice.wav" "$M/game.wav" "$M/music.wav" 16 > host-mismatch.log 2>&1 &
+HOST=$!
+node test/plugin-listener.mjs --server "ws://127.0.0.1:$PORT" --channel ci_channel --seconds 12 --stems 4 --rest-audible
+wait $HOST || true
+grep -q '"mixMismatch":"game"' hub.log || { tail -5 hub.log; echo "##teamcity[buildProblem description='the plugin did not report the game track missing from the streamed track']"; exit 1; }
+grep -q '"mixMismatch":"voice"\|"mixMismatch":"music"' hub.log && { echo "##teamcity[buildProblem description='mixMismatch named a stem that is on the streamed track']"; exit 1; }
 
 # The hub sets the channel's audio quality; the plugin follows it.
 Q_PORT=$((PORT + 1))

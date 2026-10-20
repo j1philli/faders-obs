@@ -181,10 +181,12 @@ static void status_text(struct dstr *out)
 		dstr_printf(out, "Connecting… %s", st.last_error[0] ? st.last_error : "");
 	else if (st.stream_track_silent)
 		dstr_printf(out, "Connected, but Track %d (what OBS streams) is silent: viewers hear nothing.", st.stream_track);
+	else if (st.mix_mismatch[0])
+		dstr_printf(out, "Connected, but %s is sent to Faders and not to your stream (Track %d).", st.mix_mismatch, st.stream_track);
 	else if (st.listeners == 0)
-		dstr_copy(out, "Connected. Paused until a viewer turns Faders on.");
+		dstr_printf(out, "Connected. Paused until a viewer turns Faders on. %d layers.", st.stems);
 	else
-		dstr_printf(out, "Connected. %d listener%s, sending %d kbps.", st.listeners, st.listeners == 1 ? "" : "s", st.uplink_kbps);
+		dstr_printf(out, "Connected. %d listener%s, %d kbps, %d layers.", st.listeners, st.listeners == 1 ? "" : "s", st.uplink_kbps, st.stems);
 }
 
 // ── Settings source (properties window) ─────────────────────────────────────────────────
@@ -251,6 +253,20 @@ static obs_properties_t *src_properties(void *data)
 			    now_st.stream_track, now_st.stream_track);
 		obs_property_t *w = obs_properties_add_text(props, "stream_silent", warn.array, OBS_TEXT_INFO);
 		obs_property_text_set_info_type(w, OBS_TEXT_INFO_ERROR);
+		obs_property_text_set_info_word_wrap(w, true);
+		dstr_free(&warn);
+	}
+
+	if (now_st.mix_mismatch[0]) {
+		struct dstr warn = {0};
+		dstr_printf(&warn,
+			    "Your %s layer is sent to Faders but is not in Track %d, the one OBS streams, so viewers "
+			    "can't hear it from the stream and the extension can't line it up. In Edit → Advanced Audio "
+			    "Properties, tick Track %d for that source as well as its Faders track. "
+			    "<a href=\"https://faders.tv/docs/obs-tracks/\">How to set up tracks</a>",
+			    now_st.mix_mismatch, now_st.stream_track, now_st.stream_track);
+		obs_property_t *w = obs_properties_add_text(props, "mix_mismatch", warn.array, OBS_TEXT_INFO);
+		obs_property_text_set_info_type(w, OBS_TEXT_INFO_WARNING);
 		obs_property_text_set_info_word_wrap(w, true);
 		dstr_free(&warn);
 	}

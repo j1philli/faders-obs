@@ -2,7 +2,8 @@
 
 A plugin for [OBS Studio](https://obsproject.com). Faders isn't affiliated with or endorsed by the OBS Project.
 
-Sends three audio tracks that you choose and name to the Faders hub so
+Sends your **voice**, **game** and **music** as separate layers (plus **Everything else**, whatever
+is on your stream but not on those tracks: alerts, transitions) to the Faders hub so
 viewers can mix them. Your Twitch stream is not touched.
 
 **Get it:** download the installer from [faders.tv/streamers](https://faders.tv/streamers/) or the
