@@ -56,6 +56,11 @@ struct snapshot {
 // A × (1 − t) + B × t for sources only on one side.
 struct fade {
 	bool active;
+	// transition_stop arrived: libobs no longer mixes A at all, but A's sources can stay
+	// "active" for a tick or two until the video thread deactivates them. Keep A silent (and B
+	// at full gain) until every A-only source is inactive, then forget the fade.
+	bool stopped;
+	uint64_t stopped_ns;
 	bool learning; // measure the real duration from obs_transition_get_time() reaching 1
 	uint64_t start_ns, dur_ns;
 	obs_source_t *a[MAX_TREE], *b[MAX_TREE]; // raw pointers for membership only
@@ -65,6 +70,7 @@ struct fade {
 struct ats_slot {
 	obs_source_t *src;
 	uint64_t ats;
+	bool active; // obs_source_active() at the last tick
 };
 
 struct stats {
@@ -103,6 +109,7 @@ struct fdr_mixer {
 	os_event_t *stop_ev;
 	volatile bool dirty;
 	uint64_t given_dur_ns;   // from the frontend's transition duration setting (0 = none)
+	uint64_t dbg_until;      // FADERS_DEBUG: log every tick until this time
 	uint64_t learned_dur_ns; // measured from the last fade: when get_time() reached 1
 };
 
@@ -115,12 +122,12 @@ static inline bool near(uint64_t a, uint64_t b)
 
 // ── Audio thread ────────────────────────────────────────────────────────────────────────
 
-static uint64_t *ats_for(struct fdr_mixer *m, obs_source_t *src)
+static struct ats_slot *ats_for(struct fdr_mixer *m, obs_source_t *src)
 {
 	struct ats_slot *free_slot = NULL;
 	for (size_t i = 0; i < sizeof(m->ats) / sizeof(*m->ats); i++) {
 		if (m->ats[i].src == src)
-			return &m->ats[i].ats;
+			return &m->ats[i];
 		if (!m->ats[i].src && !free_slot)
 			free_slot = &m->ats[i];
 	}
@@ -128,7 +135,8 @@ static uint64_t *ats_for(struct fdr_mixer *m, obs_source_t *src)
 		free_slot = &m->ats[0];
 	free_slot->src = src;
 	free_slot->ats = 0;
-	return &free_slot->ats;
+	free_slot->active = false;
+	return free_slot;
 }
 
 static inline bool in_set(obs_source_t *const *set, int n, obs_source_t *s)
@@ -156,14 +164,19 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 	static struct obs_source_audio_mix mix;
 	static double yy;
 	static int oracle_ticks;
+	static char why[MAX_ENTRIES]; // debug: gate reason per entry this tick
+	memset(why, '.', sizeof(why));
 
 	pthread_mutex_lock(&m->mu);
 	uint64_t t_in = os_gettime_ns();
 	struct snapshot *snap = m->snap;
 	int n_wire = m->n_wire;
-	// The gains stay applied (clamped at t = 1: A silent, B full) until the transition stops:
-	// libobs keeps crossfading A at 0 until the video side ends it and A goes inactive.
-	bool fading = m->fade.active && ts_end > m->fade.start_ns;
+	// The gains apply from the moment the transition starts (B contributes 0 before its start
+	// time, like libobs) and stay applied (clamped at t = 1: A silent, B full) until the
+	// transition stops and A's sources have gone inactive.
+	bool fading = m->fade.active;
+	if (m->fade.active && m->fade.stopped && ts > m->fade.stopped_ns + 2000000000ULL)
+		m->fade.active = false; // safety: A never went inactive (e.g. it's also in B's tree)
 	if (m->fade.active && ts > m->fade.start_ns + m->fade.dur_ns + 5000000000ULL)
 		m->fade.active = false; // safety: a stop signal we never saw
 	if (m->fade.learning) {
@@ -184,38 +197,105 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 	}
 	memset(acc, 0, sizeof(float) * (size_t)(n_wire + 1) * CH * FRAMES);
 
+	// The end of a fade is ambiguous: once the audio side has finished transitioning, libobs
+	// copies whichever scene sits in slot A, which is the old scene until the video side (at
+	// frame rate) ends the transition and swaps them, and the swap can land between the
+	// transition's audio render and this callback. So for ticks past the end, and until A's
+	// sources have gone inactive, the two candidates (old scene in full, new scene in full)
+	// are held back and the one that matches the transition source's own output this tick
+	// is used.
+	bool ambiguous = fading && (m->fade.stopped || ts >= m->fade.start_ns + m->fade.dur_ns);
+	static float cand[2][CH][FRAMES];
+	static int8_t side[MAX_ENTRIES]; // 0 = A-only candidate, 1 = B-only, -1 = decided already
+	static struct obs_source_audio_mix tmix;
+	const float *tout_l = NULL, *tout_r = NULL;
+	if (ambiguous) {
+		obs_source_t *t = m->tr ? obs_weak_source_get_source(m->tr) : NULL;
+		if (t) {
+			obs_source_get_audio_mix(t, &tmix);
+			tout_l = tmix.output[m->mix_idx].data[0];
+			tout_r = tmix.output[m->mix_idx].data[1];
+			obs_source_release(t);
+		}
+		if (!tout_l)
+			ambiguous = false; // no transition buffer to compare with: fall back to the signals
+		memset(cand, 0, sizeof(cand));
+	}
 	int n = snap ? snap->n : 0;
+	bool a_alive = false; // after a stop: is any A-only source still active?
 	for (int k = 0; k < n; k++) {
 		struct entry *e = &snap->e[k];
 		inc[k] = false;
 		obs_source_t *s = obs_weak_source_get_source(e->weak);
 		if (!s)
 			continue;
-		uint64_t *prev = ats_for(m, s);
+		struct ats_slot *slot = ats_for(m, s);
 		uint64_t ats = obs_source_get_audio_timestamp(s);
-		uint64_t was = *prev;
-		*prev = ats;
+		uint64_t was = slot->ats;
+		bool active = obs_source_active(s);
+		bool was_active = slot->active;
+		slot->ats = ats;
+		slot->active = active;
+		bool in_a = fading && in_set(m->fade.a, m->fade.na, s), in_b = fading && in_set(m->fade.b, m->fade.nb, s);
+		if (in_a && !in_b && active)
+			a_alive = true;
+		// Ending a transition moves B from its slot to A's, which deactivates and reactivates
+		// every B source within the same call; a tick can catch it inactive while libobs mixes
+		// it in full. B-only sources that were active stay active across the stop window.
+		if (m->fade.stopped && in_b && !in_a && was_active && !active) {
+			active = true;
+			slot->active = true;
+		}
 		if (e->fader == REST) { // Everything else: whatever the stream has of it is in the residual
+			why[k] = 'R';
 			obs_source_release(s);
 			continue;
 		}
 		if (!e->force) {
 			// The gate: what libobs mixed into the streamed track this tick, from frame 0.
-			if (!obs_source_active(s) || !(obs_source_get_audio_mixers(s) & m->stream_bit) ||
+			if (!active || !(obs_source_get_audio_mixers(s) & m->stream_bit) ||
 			    obs_source_get_monitoring_type(s) == OBS_MONITORING_TYPE_MONITOR_ONLY || obs_source_audio_pending(s) || !near(ats, ts_end)) {
+				why[k] = !active ? 'i' : obs_source_audio_pending(s) ? 'p' : !near(ats, ts_end) ? 't' : 'g';
 				obs_source_release(s);
 				continue;
 			}
-			if (!near(was, ts)) {
+			if (!near(was, ts) || !was_active) {
+				why[k] = !was_active ? 'A' : 'r';
 				// First tick of this source (or a resync): offset unknown, leave it to the residual.
+				// Also the tick a source becomes active: a scene switched in by a transition is
+				// mixed by libobs at t ≈ 0 before our transition_start handler has run, and a cut
+				// is one tick of Everything else.
 				m->st.gated_new[k]++;
 				obs_source_release(s);
 				continue;
 			}
 		}
 		obs_source_get_audio_mix(s, &mix);
-		bool in_a = fading && in_set(m->fade.a, m->fade.na, s), in_b = fading && in_set(m->fade.b, m->fade.nb, s);
-		bool per_sample = fading && in_a != in_b; // on both sides: gain 1 (libobs mixes it once, as a root)
+		side[k] = -1;
+		if (ambiguous && in_a != in_b) {
+			// Held back: added to a candidate, decided after the loop.
+			obs_source_get_audio_mix(s, &mix);
+			const float *il = mix.output[m->mix_idx].data[0], *ir = mix.output[m->mix_idx].data[1];
+			float *cl = cand[in_a ? 0 : 1][0], *cr = cand[in_a ? 0 : 1][1];
+			for (size_t i = 0; i < FRAMES; i++) {
+				cl[i] += il[i];
+				cr[i] += ir[i];
+			}
+			side[k] = in_a ? 0 : 1;
+			contrib[k][0] = il;
+			contrib[k][1] = ir;
+			why[k] = in_a ? 'a' : 'b';
+			obs_source_release(s);
+			continue;
+		}
+		if (in_a && !in_b && m->fade.stopped) {
+			// Transition over: libobs mixes only B now, whatever A's active flag still says.
+			why[k] = 'S';
+			m->st.gated_new[k]++;
+			obs_source_release(s);
+			continue;
+		}
+		bool per_sample = fading && !m->fade.stopped && in_a != in_b; // on both sides: gain 1 (libobs mixes it once, as a root)
 		float *dst_l = acc[e->fader][0], *dst_r = acc[e->fader][1];
 		const float *in_l = mix.output[m->mix_idx].data[0], *in_r = mix.output[m->mix_idx].data[1];
 		const float *c_l = in_l, *c_r = in_r;
@@ -238,9 +318,41 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 		contrib[k][0] = c_l;
 		contrib[k][1] = c_r;
 		inc[k] = true;
+		why[k] = per_sample ? 'f' : 'I';
 		m->st.included[k]++;
 		obs_source_release(s);
 	}
+
+	if (ambiguous) {
+		// Which candidate did libobs play this tick? The one the transition's output is closer to.
+		double err[2] = {0, 0};
+		for (int c = 0; c < 2; c++)
+			for (size_t i = 0; i < FRAMES; i++) {
+				double dl = tout_l[i] - cand[c][0][i], dr = tout_r[i] - cand[c][1][i];
+				err[c] += dl * dl + dr * dr;
+			}
+		int win = err[1] < err[0] ? 1 : 0;
+		for (int k = 0; k < n; k++) {
+			if (side[k] < 0)
+				continue;
+			struct entry *e = &snap->e[k];
+			if (side[k] != win) {
+				why[k] = 'E';
+				m->st.gated_new[k]++;
+				continue;
+			}
+			float *dst_l = acc[e->fader][0], *dst_r = acc[e->fader][1];
+			for (size_t i = 0; i < FRAMES; i++) {
+				dst_l[i] += contrib[k][0][i];
+				dst_r[i] += contrib[k][1][i];
+			}
+			inc[k] = true;
+			m->st.included[k]++;
+			why[k] = win ? 'B' : 'A';
+		}
+	}
+	if (m->fade.active && m->fade.stopped && !a_alive)
+		m->fade.active = false; // A is gone from the program: back to plain gating
 
 	// Everything else = the unclamped track − Σ faders.
 	float *rest_l = acc[n_wire][0], *rest_r = acc[n_wire][1];
@@ -261,6 +373,15 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 		rest_sq += (double)rest_l[i] * rest_l[i] + (double)rest_r[i] * rest_r[i];
 	}
 
+	if (m->dbg_until && ts < m->dbg_until) {
+		why[n < MAX_ENTRIES ? n : MAX_ENTRIES - 1] = 0;
+		char names[512] = "";
+		for (int k = 0; k < n && strlen(names) < 440; k++) {
+			strncat(names, snap->e[k].name, 12);
+			strncat(names, "/", 2);
+		}
+		blog(LOG_INFO, "[faders-dbg] tick ts-start=%.1f ms fading=%d stopped=%d rest=%.1f dBFS gates=%s names=%s", ((double)ts - (double)m->fade.start_ns) / 1e6, fading, m->fade.stopped, 10 * log10(rest_sq / (2.0 * FRAMES) + 1e-20), why, names);
+	}
 	// Oracle sums for every included source, every other tick (the window is 0.5 s; half the
 	// samples are plenty of evidence and it halves the per-tick cost).
 	for (int k = 0; k < n; k++) {
@@ -565,6 +686,8 @@ static void on_transition_start(void *data, calldata_t *cd)
 	pthread_mutex_lock(&m->mu);
 	m->fade = f;
 	m->fade.learning = f.active;
+	if (getenv("FADERS_DEBUG"))
+		m->dbg_until = f.start_ns + 1000000000ULL;
 	pthread_mutex_unlock(&m->mu);
 	if (getenv("FADERS_DEBUG"))
 		blog(LOG_INFO, "[faders] transition start: %s → %s, %llu ms, A tree %d, B tree %d, modelled=%d", name_a, name_b, (unsigned long long)(dur / 1000000ULL), f.na, f.nb, f.active);
@@ -586,7 +709,10 @@ static void on_transition_stop(void *data, calldata_t *cd)
 	UNUSED_PARAMETER(cd);
 	struct fdr_mixer *m = data;
 	pthread_mutex_lock(&m->mu);
-	m->fade.active = false;
+	if (m->fade.active && !m->fade.stopped) {
+		m->fade.stopped = true;
+		m->fade.stopped_ns = os_gettime_ns();
+	}
 	pthread_mutex_unlock(&m->mu);
 }
 

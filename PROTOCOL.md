@@ -119,9 +119,18 @@ events; the audio thread takes a strong reference per source per tick):
 2. Gain: 1, or during a transition the per-sample crossfade (A × (1 − t), B × t with
    t = (sample_ts − start) / duration; start from the transition's `transition_start` signal,
    duration from the frontend's setting, `faders_transition_duration` headless, or learned from
-   the last fade; kept clamped until `transition_stop`). Fixed-length transitions (stingers) are
-   not modelled: their audio is the transition's own and lands in Everything else. A source on
-   both sides, or appearing twice in the tree, gets gain 1 (libobs mixes it once).
+   the last fade). The end of a fade is racy to observe: once the audio side reaches t ≥ 1,
+   libobs copies whichever scene sits in slot A (the old one, in full, until the video thread
+   swaps the slots), the swap deactivates and reactivates the new scene within one call, and
+   `transition_stop` can land between the transition's audio render and our callback. So for
+   ticks past the fade end, until the old scene's sources are inactive, both candidates (old
+   scene in full, new scene in full) are held back and the one closer to the transition
+   source's own `obs_source_get_audio_mix()` output that tick is used. A source's first active
+   tick goes to Everything else (a scene switched in by a transition is mixed at t ≈ 0 before
+   the `transition_start` handler runs). Fixed-length transitions (stingers) are not modelled:
+   their audio is the transition's own and lands in Everything else. A source on both sides, or
+   appearing twice in the tree, gets gain 1 (libobs mixes it once). `faders-mixtest` case 7
+   holds < −40 dBFS during a 300 ms fade in 16/16 runs (−76 to −109).
 3. Sum into its fader (`faders_fader` private setting by name; absent = the rule table;
    "" = Everything else; faders past the plan's `maxStems` fold into Everything else).
 4. Everything else = unclamped track − Σ faders. Σ(all stems) == the streamed track exactly.
