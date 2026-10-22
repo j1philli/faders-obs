@@ -46,6 +46,8 @@ static char *config_file(void)
 	return obs_module_config_path("settings.json");
 }
 
+static void names_changed(void);
+
 // ── Starting / stopping ─────────────────────────────────────────────────────────────────
 
 static bool should_run(obs_data_t *s)
@@ -78,6 +80,7 @@ static void apply(obs_data_t *s)
 		fdr_uplink_config cfg = {
 			.server = obs_data_get_string(s, "server"),
 			.key = obs_data_get_string(s, "key"),
+			.names_changed = names_changed,
 			.tracks = {(int)obs_data_get_int(s, "track_voice"), (int)obs_data_get_int(s, "track_game"),
 				   (int)obs_data_get_int(s, "track_music")},
 		};
@@ -100,6 +103,29 @@ static void get_status(fdr_uplink_status *st)
 	pthread_mutex_lock(&uplink_mu);
 	fdr_uplink_get_status(uplink, st);
 	pthread_mutex_unlock(&uplink_mu);
+}
+
+// Runs on OBS's UI thread. Updating the labels must not apply/restart the audio uplink.
+static void refresh_names(void *unused)
+{
+	UNUSED_PARAMETER(unused);
+	if (!settings_source) return;
+	fdr_uplink_status st;
+	get_status(&st);
+	if (!st.fader_names[0][0]) return;
+	obs_data_t *settings = obs_source_get_settings(settings_source);
+	const char *keys[] = {"name_voice", "name_game", "name_music"};
+	for (int i = 0; i < 3; i++) obs_data_set_string(settings, keys[i], st.fader_names[i]);
+	char *path = config_file();
+	obs_data_save_json_safe(settings, path, "tmp", "bak");
+	bfree(path);
+	obs_data_release(settings);
+	obs_source_update_properties(settings_source);
+}
+
+static void names_changed(void)
+{
+	obs_queue_task(OBS_TASK_UI, refresh_names, NULL, false);
 }
 
 static void status_text(struct dstr *out)
@@ -142,6 +168,9 @@ static void src_defaults(obs_data_t *s)
 	obs_data_set_default_bool(s, "enabled", true);
 	obs_data_set_default_string(s, "server", DEFAULT_SERVER);
 	obs_data_set_default_bool(s, "only_live", true);
+	obs_data_set_default_string(s, "name_voice", "Voice");
+	obs_data_set_default_string(s, "name_game", "Game");
+	obs_data_set_default_string(s, "name_music", "Music");
 	obs_data_set_default_int(s, "track_voice", 2);
 	obs_data_set_default_int(s, "track_game", 3);
 	obs_data_set_default_int(s, "track_music", 4);
@@ -201,9 +230,26 @@ static obs_properties_t *src_properties(void *data)
 	obs_properties_add_text(props, "portal", "<a href=\"" PORTAL_URL "\">Open the Faders portal to get key</a>", OBS_TEXT_INFO);
 
 	obs_properties_t *tracks = obs_properties_create();
-	add_track_list(tracks, "track_voice", "Voice");
-	add_track_list(tracks, "track_game", "Game");
-	add_track_list(tracks, "track_music", "Music");
+	obs_data_t *settings = settings_source ? obs_source_get_settings(settings_source) : NULL;
+	const char *track_keys[] = {"track_voice", "track_game", "track_music"};
+	const char *name_keys[] = {"name_voice", "name_game", "name_music"};
+	const char *defaults[] = {"Voice", "Game", "Music"};
+	for (int i = 0; i < 3; i++) {
+		const char *label = settings ? obs_data_get_string(settings, name_keys[i]) : "";
+		// OBS renders property descriptions using QLabel's automatic rich-text detection.
+		// Always wrap escaped text so names containing tags or ampersands remain literal.
+		struct dstr escaped = {0}, description = {0};
+		dstr_copy(&escaped, *label ? label : defaults[i]);
+		dstr_replace(&escaped, "&", "&amp;");
+		dstr_replace(&escaped, "<", "&lt;");
+		dstr_replace(&escaped, ">", "&gt;");
+		dstr_printf(&description, "<span>%s</span>", escaped.array);
+		add_track_list(tracks, track_keys[i], description.array);
+		dstr_free(&description);
+		dstr_free(&escaped);
+	}
+	obs_data_release(settings);
+	obs_properties_add_text(tracks, "rename", "<a href=\"" PORTAL_URL "\">Customize fader names in the portal</a> (syncs here and to viewers)", OBS_TEXT_INFO);
 	obs_properties_add_group(props, "tracks", "Audio tracks (assign sources in Edit → Advanced Audio Properties)", OBS_GROUP_NORMAL, tracks);
 
 	obs_properties_add_bool(props, "only_live", "Only send while streaming");
@@ -295,6 +341,11 @@ static void proc_status(void *unused, calldata_t *cd)
 	struct dstr text = {0};
 	status_text(&text);
 	calldata_set_string(cd, "status", text.array);
+	fdr_uplink_status st;
+	get_status(&st);
+	calldata_set_string(cd, "voice", st.fader_names[0]);
+	calldata_set_string(cd, "game", st.fader_names[1]);
+	calldata_set_string(cd, "music", st.fader_names[2]);
 	dstr_free(&text);
 }
 
@@ -316,7 +367,7 @@ bool obs_module_load(void)
 	// Headless tests have no streaming output: point the streamed-track check at a track directly.
 	proc_handler_add(ph, "void faders_watch_stream_track(in int track)", proc_watch_stream_track, NULL);
 	proc_handler_add(ph, "void faders_configure(in string server, in string key, in int voice, in int game, in int music, in bool only_live)", proc_configure, NULL);
-	proc_handler_add(ph, "void faders_status(out string status)", proc_status, NULL);
+	proc_handler_add(ph, "void faders_status(out string status, out string voice, out string game, out string music)", proc_status, NULL);
 
 	// No-ops when there's no OBS frontend (e.g. the headless test host).
 	obs_frontend_add_tools_menu_item("Faders", open_settings, NULL);

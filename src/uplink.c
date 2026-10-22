@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <limits.h>
 
 #define SAMPLE_RATE 48000
 #define FRAME_MS 20
@@ -68,6 +69,7 @@ struct tap {
 struct fdr_uplink {
 	char *server;
 	char *key;
+	void (*names_changed)(void);
 	struct tap taps[STEMS];
 
 	pthread_mutex_t mu; // guards rings, start_ts, ws state, status
@@ -234,42 +236,67 @@ static void on_text(void *param, const char *text)
 	pthread_mutex_lock(&u->mu);
 	u->last_rx_ns = os_gettime_ns();
 	pthread_mutex_unlock(&u->mu);
-	// The hub sends {"type":"listeners","n":N}, {"type":"update","latest":"X.Y.Z"} and "pong".
-	// Tiny, fixed shapes: no JSON parser.
-	const char *latest = strstr(text, "\"latest\":\"");
-	if (strstr(text, "\"update\"") && latest) {
-		latest += 10;
-		size_t n = strspn(latest, "0123456789.");
-		pthread_mutex_lock(&u->mu);
-		if (n > 0 && n < sizeof(u->status.update_available)) {
-			memcpy(u->status.update_available, latest, n);
-			u->status.update_available[n] = 0;
+	if (!strcmp(text, "pong"))
+		return;
+	// Labels are arbitrary Unicode strings: parse the whole message rather than searching
+	// JSON text, so escaped quotes or words such as "quality" in a name stay plain labels.
+	obs_data_t *message = obs_data_create_from_json(text);
+	if (!message)
+		return;
+	const char *type = obs_data_get_string(message, "type");
+	if (!strcmp(type, "fader-names")) {
+		obs_data_t *names = obs_data_get_obj(message, "names");
+		const char *keys[] = {"voice", "game", "music"};
+		char labels[3][FDR_NAME_BYTES] = {{0}};
+		bool valid = names != NULL;
+		for (int i = 0; valid && i < STEMS; i++) {
+			const char *name = obs_data_get_string(names, keys[i]);
+			size_t bytes = strlen(name), points = 0;
+			valid = bytes > 0 && bytes < FDR_NAME_BYTES;
+			for (size_t j = 0; valid && j < bytes; j++) {
+				unsigned char c = (unsigned char)name[j];
+				if ((c & 0xc0) != 0x80) points++;
+				if (c < 0x20 || c == 0x7f || (c == 0xc2 && j + 1 < bytes && (unsigned char)name[j + 1] < 0xa0)) valid = false;
+			}
+			if (points > 24) valid = false;
+			if (valid) memcpy(labels[i], name, bytes + 1);
 		}
-		pthread_mutex_unlock(&u->mu);
-		blog(LOG_INFO, "[faders] update available: %.*s (this is %s)", (int)n, latest, FDR_VERSION_STR);
-		return;
+		if (valid) {
+			pthread_mutex_lock(&u->mu);
+			bool changed = memcmp(labels, u->status.fader_names, sizeof(labels)) != 0;
+			memcpy(u->status.fader_names, labels, sizeof(labels));
+			pthread_mutex_unlock(&u->mu);
+			if (changed && u->names_changed) u->names_changed();
+		}
+		obs_data_release(names);
+	} else if (!strcmp(type, "update")) {
+		const char *latest = obs_data_get_string(message, "latest");
+		size_t n = strspn(latest, "0123456789.");
+		if (n > 0 && n == strlen(latest) && n < sizeof(u->status.update_available)) {
+			pthread_mutex_lock(&u->mu);
+			memcpy(u->status.update_available, latest, n + 1);
+			pthread_mutex_unlock(&u->mu);
+			blog(LOG_INFO, "[faders] update available: %s (this is %s)", latest, FDR_VERSION_STR);
+		}
+	} else if (!strcmp(type, "quality")) {
+		long long kbps = obs_data_get_int(message, "kbps");
+		if (kbps >= MIN_BITRATE / 1000 && kbps <= MAX_BITRATE / 1000) {
+			pthread_mutex_lock(&u->mu);
+			u->want_bitrate = (int)kbps * 1000;
+			pthread_mutex_unlock(&u->mu);
+		}
+	} else if (!strcmp(type, "listeners")) {
+		long long n = obs_data_get_int(message, "n");
+		if (n >= 0 && n <= INT_MAX) {
+			int listeners = (int)n;
+			pthread_mutex_lock(&u->mu);
+			if ((u->listeners == 0) != (listeners == 0))
+				blog(LOG_INFO, "[faders] %d listener(s): %s uplink", listeners, listeners ? "resuming" : "pausing");
+			u->listeners = listeners;
+			pthread_mutex_unlock(&u->mu);
+		}
 	}
-	const char *kbps = strstr(text, "\"kbps\":");
-	if (strstr(text, "\"quality\"") && kbps) {
-		int bps = atoi(kbps + 7) * 1000;
-		if (bps < MIN_BITRATE || bps > MAX_BITRATE)
-			return;
-		pthread_mutex_lock(&u->mu);
-		u->want_bitrate = bps;
-		pthread_mutex_unlock(&u->mu);
-		return;
-	}
-	if (!strstr(text, "\"listeners\""))
-		return;
-	const char *n = strstr(text, "\"n\":");
-	if (!n)
-		return;
-	int listeners = atoi(n + 4);
-	pthread_mutex_lock(&u->mu);
-	if ((u->listeners == 0) != (listeners == 0))
-		blog(LOG_INFO, "[faders] %d listener(s): %s uplink", listeners, listeners ? "resuming" : "pausing");
-	u->listeners = listeners;
-	pthread_mutex_unlock(&u->mu);
+	obs_data_release(message);
 }
 
 static void on_close(void *param, const char *reason)
@@ -453,6 +480,7 @@ fdr_uplink_t *fdr_uplink_start(const fdr_uplink_config *cfg)
 	struct fdr_uplink *u = bzalloc(sizeof(*u));
 	u->server = bstrdup(cfg->server);
 	u->key = bstrdup(cfg->key);
+	u->names_changed = cfg->names_changed;
 	u->last_sent_seq = -1;
 	u->seq0 = (uint32_t)((uint64_t)time(NULL) * 1000 / CHUNK_MS);
 	u->window_start_ns = os_gettime_ns();

@@ -4,7 +4,7 @@
 # Dependencies live in .deps/ (scripts/fetch-deps.sh on macOS, scripts/fetch-deps-windows.ps1 on
 # Windows, scripts/cross-windows.sh to cross-compile the Windows DLL from macOS).
 cmake_minimum_required(VERSION 3.24)
-project(faders VERSION 0.2.0 LANGUAGES C)
+project(faders VERSION 0.3.0 LANGUAGES C)
 # Plugin Manager metadata (OBS 32+ reads data/manifest.json): written from the project version so
 # it can't drift; committed so the installers, which package data/, always include it.
 configure_file("${CMAKE_SOURCE_DIR}/cmake/manifest.json.in" "${CMAKE_SOURCE_DIR}/data/manifest.json" @ONLY NEWLINE_STYLE UNIX)

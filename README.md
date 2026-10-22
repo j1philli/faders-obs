@@ -13,6 +13,10 @@ viewers can mix them. Your Twitch stream is not touched.
   key (with a link to the portal to get one), which mixer track is voice / game / music, "only
   send while streaming". The server is `wss://hub.faders.tv/ingest` (the key identifies the
   channel); tests point it elsewhere with the `faders_configure` procedure.
+- **Custom fader names (0.3.0+):** rename the three layers in the [portal](https://faders.tv/portal/).
+  The hub sends the same labels to viewers and this plugin. **Tools → Faders → Audio tracks**
+  refreshes while open and remembers labels when disconnected. Names change display labels only;
+  track assignments and the three audio stem IDs stay the same. Older hubs keep the default names.
 - OBS 32+ shows Faders and its version in **Tools → Plugin Manager** (`data/manifest.json`,
   written from the project version by CMake).
 - Taps OBS mixer tracks with `obs_add_raw_audio_callback` (default tracks 2/3/4). Assign
@@ -134,3 +138,5 @@ Released as 0.1.0. These parts haven't been tested by hand yet; bug reports are 
 GPL-2.0-or-later (see `LICENSE`), the same as OBS Studio, which this plugin links against.
 Bundled: Opus (BSD-3-Clause). The Faders hub, website and browser extension are separate
 programs that talk to this plugin over the network protocol in `PROTOCOL.md`.
+
+Name synchronization regression test (after building): `node test/fader-names.mjs`. It loads the real plugin in libobs, receives Unicode labels, rejects an excessive name, applies a live rename and checks the saved local labels.
