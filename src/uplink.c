@@ -29,10 +29,7 @@
 #define FRAME_SAMPLES (SAMPLE_RATE * FRAME_MS / 1000) // 960
 #define CHUNK_MS 500
 #define FRAMES_PER_CHUNK (CHUNK_MS / FRAME_MS) // 25
-// Stems: the three track layers, plus "Everything else" (the streamed track minus the three)
-// while the streamed track is being watched. MAX_STEMS bounds the wire format and arrays.
-#define TRACK_STEMS 3
-#define REST_STEM TRACK_STEMS
+// MAX_STEMS bounds the wire format and arrays; the mixer sets the actual count.
 #define MAX_STEMS FDR_MAX_STEMS
 // Every stem is stereo at the same bitrate, whatever it carries. Twitch serves ~160 kbps stereo
 // AAC-LC; 128 kbps stereo Opus is at least as good, and is the default. The hub can raise it
@@ -54,13 +51,6 @@
 #define STREAM_SILENT_NS 10000000000ULL
 // A stem whose whole 500 ms chunk peaks below -60 dBFS is sent as "silent" (no Opus frames).
 #define SILENT_STEM_PEAK 0.001f
-// Oracle: the residual correlated with a stem this strongly, this many chunks in a row, means
-// that stem is sent to Faders but is not in the streamed track (or the other way round).
-#define MISMATCH_R 0.5
-#define MISMATCH_CHUNKS 3
-
-static const char *const STEM_NAMES[TRACK_STEMS] = {"Voice", "Game", "Music"};
-static const char *const STEM_KEYS[TRACK_STEMS] = {"voice", "game", "music"};
 
 struct ring {
 	float buf[RING_SAMPLES];
@@ -74,29 +64,20 @@ struct chunk {
 	size_t len;
 };
 
-struct tap {
-	struct fdr_uplink *u;
-	int stem;
-	size_t mix_idx;
-};
-
 struct fdr_uplink {
 	char *server;
 	char *key;
-	struct tap taps[TRACK_STEMS];
 
-	pthread_mutex_t mu; // guards rings, start_ts, ws state, status
+	pthread_mutex_t mu; // guards rings, ws state, status
 	struct ring *rings[MAX_STEMS];
-	int n_stems;       // stems on the wire: tracks mode 3, or 4 while the streamed track is watched; sources mode: as set
-	bool sources_mode; // stems are pushed by the mixer; no taps, no residual/oracle here
+	int n_stems; // stems on the wire, as the mixer set them (0 until it does)
 	char names[MAX_STEMS][FDR_STEM_NAME_MAX];
-	bool rest_last;    // sources mode: the last stem is "Everything else"
-	uint64_t start_ts; // first audio timestamp all stems accept, so they start aligned
+	bool rest_last; // the last stem is "Everything else"
 
 	OpusEncoder *enc[MAX_STEMS];
 	int bitrate;      // what the encoders use (worker thread only)
 	int want_bitrate; // set from the hub's message (guarded by mu)
-	int max_stems;    // from the hub's quality message; informational until sources mode
+	int max_stems;    // from the hub's quality message; the mixer folds faders past it
 	// The chunk being assembled: per stem, FRAMES_PER_CHUNK Opus packets.
 	uint8_t packets[MAX_STEMS][FRAMES_PER_CHUNK][MAX_PACKET];
 	int16_t packet_len[MAX_STEMS][FRAMES_PER_CHUNK];
@@ -105,9 +86,6 @@ struct fdr_uplink {
 	uint32_t layout_gen; // bumped (locked) whenever n_stems changes; a chunk never mixes layouts
 	uint32_t chunk_gen;  // worker: the layout the chunk in progress was started with
 	int chunk_stems;     // worker: stems in that layout
-	// Oracle sums over the chunk: Σ rest·stem, Σ stem², Σ rest².
-	double xy[TRACK_STEMS], xx[TRACK_STEMS], yy;
-	int mismatch_run[TRACK_STEMS]; // consecutive chunks with |r| > MISMATCH_R (negative: below)
 
 	uint32_t seq0; // stream clock: wall-clock based so a restarted OBS continues it
 	uint32_t chunk_n;
@@ -130,8 +108,8 @@ struct fdr_uplink {
 	size_t window_bytes;
 	fdr_uplink_status status;
 
-	// Stream-track check (fdr_uplink_watch_stream_track). Times are os_gettime_ns.
-	struct tap stream_tap; // stem = REST_STEM
+	// Stream-track check (fdr_uplink_watch_stream_track): the mixer taps the track and reports
+	// its peak with every pushed tick. Times are os_gettime_ns.
 	bool watching_stream;
 	uint64_t watch_start_ns;
 	uint64_t stream_heard_ns; // last time the streamed track had sound
@@ -160,7 +138,7 @@ static float peak_of(const float *s, size_t n)
 	return peak;
 }
 
-// ── Audio thread: copy mixer output into per-stem rings ─────────────────────────────────
+// ── Audio thread: the mixer's stems go into per-stem rings ──────────────────────────────
 
 static void ring_push(struct ring *r, const float *src, size_t n)
 {
@@ -188,11 +166,10 @@ static void reset_rings(struct fdr_uplink *u)
 	for (int s = 0; s < MAX_STEMS; s++)
 		if (u->rings[s])
 			u->rings[s]->head = u->rings[s]->len = 0;
-	u->start_ts = 0;
 	u->layout_gen++;
 }
 
-// Sources mode: the mixer hands over every stem for one tick at once, already aligned.
+// The mixer hands over every stem for one tick at once, already aligned.
 void fdr_uplink_push_tick(fdr_uplink_t *u, uint64_t ts, const float *const *stems, int n, size_t frames, float track_peak)
 {
 	UNUSED_PARAMETER(ts);
@@ -216,35 +193,8 @@ void fdr_uplink_push_tick(fdr_uplink_t *u, uint64_t ts, const float *const *stem
 	pthread_mutex_unlock(&u->mu);
 }
 
-static void on_audio(void *param, size_t mix_idx, struct audio_data *data)
-{
-	UNUSED_PARAMETER(mix_idx);
-	struct tap *t = param;
-	struct fdr_uplink *u = t->u;
-	const float *pcm = (const float *)data->data[0];
-	size_t n = data->frames * CHANNELS;
-	pthread_mutex_lock(&u->mu);
-	// OBS delivers every mix for the same tick with the same timestamp. The first callback
-	// picks a start a little in the future; every stem drops audio before it, so all rings
-	// begin on the same sample even though the callbacks were registered one by one.
-	if (!u->start_ts)
-		u->start_ts = data->timestamp + 50000000ULL;
-	if (data->timestamp >= u->start_ts && u->rings[t->stem])
-		ring_push(u->rings[t->stem], pcm, n);
-	if (u->watching_stream) {
-		float peak = peak_of(pcm, n);
-		if (t->stem == REST_STEM) {
-			if (peak > STREAM_SOUND_PEAK)
-				u->stream_heard_ns = os_gettime_ns();
-		} else if (peak > STEM_SOUND_PEAK) {
-			u->stems_heard_ns = os_gettime_ns();
-		}
-	}
-	pthread_mutex_unlock(&u->mu);
-}
-
-// Worker thread. Tells the hub about the streamed track's silence and any track mismatch
-// whenever either changes (or the connection is new).
+// Worker thread. Tells the hub about the streamed track's silence and the mixer's mismatch
+// verdict whenever either changes (or the connection is new).
 static void send_status(struct fdr_uplink *u, uint64_t now)
 {
 	pthread_mutex_lock(&u->mu);
@@ -254,7 +204,7 @@ static void send_status(struct fdr_uplink *u, uint64_t now)
 		u->status.stream_track_silent = silent;
 		u->stream_status_dirty = true;
 		if (silent)
-			blog(LOG_WARNING, "[faders] Track %d, which OBS streams, is silent while the Faders tracks have sound: viewers hear nothing and the extension can't sync. Tick Track %d for your sources in Edit → Advanced Audio Properties.", u->status.stream_track, u->status.stream_track);
+			blog(LOG_WARNING, "[faders] Track %d, which OBS streams, is silent while the Faders layers have sound: viewers hear nothing and the extension can't sync. Tick Track %d for your sources in Edit → Advanced Audio Properties.", u->status.stream_track, u->status.stream_track);
 		else
 			blog(LOG_INFO, "[faders] Track %d is no longer flagged as silent", u->status.stream_track);
 	}
@@ -287,12 +237,11 @@ static void send_stems(struct fdr_uplink *u)
 	struct dstr msg = {0};
 	dstr_copy(&msg, "{\"type\":\"stems\",\"stems\":[");
 	for (int s = 0; s < n; s++) {
-		bool rest = u->sources_mode ? (u->rest_last && s == n - 1) : s == REST_STEM;
-		if (rest) {
+		if (u->rest_last && s == n - 1) {
 			dstr_catf(&msg, "%s{\"id\":%d,\"name\":\"Everything else\",\"rest\":true}", s ? "," : "", s);
 			continue;
 		}
-		const char *name = u->sources_mode ? u->names[s] : STEM_NAMES[s];
+		const char *name = u->names[s];
 		dstr_catf(&msg, "%s{\"id\":%d,\"name\":\"", s ? "," : "", s);
 		for (const char *c = name; *c; c++) { // JSON string: escape quotes and backslashes, drop controls
 			if (*c == '"' || *c == '\\')
@@ -466,53 +415,9 @@ static void write_u16(uint8_t *p, uint16_t v) { p[0] = v & 0xff; p[1] = v >> 8; 
 static void write_u32(uint8_t *p, uint32_t v) { for (int i = 0; i < 4; i++) p[i] = (v >> (8 * i)) & 0xff; }
 static void write_f64(uint8_t *p, double v) { memcpy(p, &v, 8); } // little-endian hosts only (arm64/x86)
 
-// Worker thread. The residual against each stem over the finished chunk: |r| near 1 means the
-// stem's audio is in the residual, i.e. the stem is not (or is twice) in the streamed track.
-static void run_oracle(struct fdr_uplink *u)
-{
-	bool rest_silent = u->chunk_peak[REST_STEM] < SILENT_STEM_PEAK;
-	for (int s = 0; s < TRACK_STEMS; s++) {
-		double r = 0;
-		bool evaluable = !rest_silent && u->chunk_peak[s] >= SILENT_STEM_PEAK && u->xx[s] > 0 && u->yy > 0;
-		if (evaluable)
-			r = u->xy[s] / sqrt(u->xx[s] * u->yy);
-		// Quiet chunks are no evidence either way; they don't advance or reset the run.
-		if (evaluable)
-			u->mismatch_run[s] = fabs(r) > MISMATCH_R ? (u->mismatch_run[s] < 0 ? 1 : u->mismatch_run[s] + 1) : (u->mismatch_run[s] > 0 ? -1 : u->mismatch_run[s] - 1);
-	}
-	// The first stem that has been mismatched for MISMATCH_CHUNKS wins; it clears after as
-	// many matching chunks.
-	const char *now = NULL;
-	for (int s = 0; s < TRACK_STEMS && !now; s++)
-		if (u->mismatch_run[s] >= MISMATCH_CHUNKS)
-			now = STEM_KEYS[s];
-	pthread_mutex_lock(&u->mu);
-	const char *was = u->status.mix_mismatch[0] ? u->status.mix_mismatch : NULL;
-	bool keep = was && !now; // clears only once that stem has matched for MISMATCH_CHUNKS
-	if (keep)
-		for (int s = 0; s < TRACK_STEMS; s++)
-			if (strcmp(STEM_KEYS[s], was) == 0 && u->mismatch_run[s] <= -MISMATCH_CHUNKS)
-				keep = false;
-	if (!keep && ((was && !now) || (now && (!was || strcmp(now, was) != 0)))) {
-		snprintf(u->status.mix_mismatch, sizeof(u->status.mix_mismatch), "%s", now ? now : "");
-		u->stream_status_dirty = true;
-		if (now)
-			blog(LOG_WARNING, "[faders] %s is sent to Faders but is not in Track %d, the one OBS streams: viewers can't hear it from the stream. Tick Track %d for that source in Edit → Advanced Audio Properties.", now, u->status.stream_track, u->status.stream_track);
-		else
-			blog(LOG_INFO, "[faders] the Faders layers match the streamed track again");
-	}
-	pthread_mutex_unlock(&u->mu);
-	memset(u->xy, 0, sizeof(u->xy));
-	memset(u->xx, 0, sizeof(u->xx));
-	u->yy = 0;
-}
-
 static void finish_chunk(struct fdr_uplink *u)
 {
 	int n_stems = u->chunk_stems;
-	bool has_rest = !u->sources_mode && n_stems > REST_STEM;
-	if (has_rest)
-		run_oracle(u);
 	size_t size = HEADER_BYTES;
 	for (int s = 0; s < n_stems; s++) {
 		size += 3;
@@ -561,7 +466,7 @@ static void encode_ready(struct fdr_uplink *u)
 		for (int s = 0; s < MAX_STEMS; s++)
 			if (u->enc[s])
 				opus_encoder_ctl(u->enc[s], OPUS_SET_BITRATE(want));
-		blog(LOG_INFO, "[faders] audio quality: %d kbps per track", want / 1000);
+		blog(LOG_INFO, "[faders] audio quality: %d kbps per layer", want / 1000);
 		u->bitrate = want;
 	}
 	for (;;) {
@@ -583,28 +488,6 @@ static void encode_ready(struct fdr_uplink *u)
 			u->chunk_stems = n_stems;
 			u->frames_in_chunk = 0;
 			memset(u->chunk_peak, 0, sizeof(u->chunk_peak));
-			memset(u->xy, 0, sizeof(u->xy));
-			memset(u->xx, 0, sizeof(u->xx));
-			u->yy = 0;
-		}
-		if (!u->sources_mode && n_stems > REST_STEM) {
-			// Everything else = the (unclamped) streamed track minus the three Faders tracks.
-			float *rest = pcm[REST_STEM];
-			for (int i = 0; i < FRAME_SAMPLES * CHANNELS; i++)
-				rest[i] -= pcm[0][i] + pcm[1][i] + pcm[2][i];
-			for (int s = 0; s < TRACK_STEMS; s++) {
-				double xy = 0, xx = 0;
-				for (int i = 0; i < FRAME_SAMPLES * CHANNELS; i++) {
-					xy += (double)rest[i] * pcm[s][i];
-					xx += (double)pcm[s][i] * pcm[s][i];
-				}
-				u->xy[s] += xy;
-				u->xx[s] += xx;
-			}
-			double yy = 0;
-			for (int i = 0; i < FRAME_SAMPLES * CHANNELS; i++)
-				yy += (double)rest[i] * rest[i];
-			u->yy += yy;
 		}
 		int f = u->frames_in_chunk;
 		for (int s = 0; s < n_stems; s++) {
@@ -669,38 +552,17 @@ fdr_uplink_t *fdr_uplink_start(const fdr_uplink_config *cfg)
 
 	u->bitrate = u->want_bitrate = OPUS_BITRATE;
 	u->max_stems = MAX_STEMS;
-	u->sources_mode = cfg->sources_mode;
 	u->chunk_gen = UINT32_MAX; // the first frame adopts the current layout
-	if (u->sources_mode) {
-		// Stems arrive with fdr_uplink_set_stems; nothing is encoded before that.
-		u->n_stems = 0;
-	} else {
-		u->n_stems = TRACK_STEMS;
-		for (int s = 0; s <= REST_STEM; s++) {
-			u->rings[s] = bzalloc(sizeof(struct ring));
-			u->enc[s] = make_encoder(OPUS_BITRATE);
-		}
-		// Interleaved stereo float at 48 kHz: OBS's stereo mix as is (mono doubled, surround folded down).
-		struct audio_convert_info conv = {.samples_per_sec = SAMPLE_RATE, .format = AUDIO_FORMAT_FLOAT, .speakers = SPEAKERS_STEREO};
-		for (int s = 0; s < TRACK_STEMS; s++) {
-			int track = cfg->tracks[s] < 1 || cfg->tracks[s] > 6 ? s + 2 : cfg->tracks[s];
-			u->taps[s] = (struct tap){u, s, (size_t)(track - 1)};
-			obs_add_raw_audio_callback(u->taps[s].mix_idx, &conv, on_audio, &u->taps[s]);
-		}
-	}
-	u->status.stems = u->n_stems;
+	u->n_stems = 0;            // stems arrive with fdr_uplink_set_stems; nothing is encoded before that
 	u->status.running = true;
 	pthread_create(&u->thread, NULL, worker, u);
-	if (u->sources_mode)
-		blog(LOG_INFO, "[faders] uplink started: sources mode → %s", u->server);
-	else
-		blog(LOG_INFO, "[faders] uplink started: tracks voice=%d game=%d music=%d → %s", (int)u->taps[0].mix_idx + 1, (int)u->taps[1].mix_idx + 1, (int)u->taps[2].mix_idx + 1, u->server);
+	blog(LOG_INFO, "[faders] uplink started → %s", u->server);
 	return u;
 }
 
 void fdr_uplink_set_stems(fdr_uplink_t *u, const char *const *names, int n, bool rest)
 {
-	if (!u || !u->sources_mode)
+	if (!u)
 		return;
 	if (n < 1)
 		n = 1;
@@ -764,9 +626,6 @@ void fdr_uplink_stop(fdr_uplink_t *u)
 {
 	if (!u)
 		return;
-	if (!u->sources_mode)
-		for (int s = 0; s < TRACK_STEMS; s++)
-			obs_remove_raw_audio_callback(u->taps[s].mix_idx, on_audio, &u->taps[s]);
 	fdr_uplink_watch_stream_track(u, 0);
 	os_event_signal(u->stop_event);
 	pthread_join(u->thread, NULL);
@@ -805,45 +664,23 @@ void fdr_uplink_watch_stream_track(fdr_uplink_t *u, int track)
 	if (!u)
 		return;
 	if (u->watching_stream) {
-		if (!u->sources_mode)
-			obs_remove_raw_audio_callback(u->stream_tap.mix_idx, on_audio, &u->stream_tap);
 		pthread_mutex_lock(&u->mu);
 		u->watching_stream = false;
 		u->status.stream_track = 0;
 		u->status.stream_track_silent = false;
 		u->status.mix_mismatch[0] = 0;
-		memset(u->mismatch_run, 0, sizeof(u->mismatch_run));
-		if (!u->sources_mode) {
-			u->n_stems = TRACK_STEMS;
-			u->stems_dirty = true;
-			reset_rings(u);
-		}
 		pthread_mutex_unlock(&u->mu);
 	}
 	if (track < 1 || track > 6)
 		return;
 	uint64_t now = os_gettime_ns();
 	pthread_mutex_lock(&u->mu);
-	u->stream_tap = (struct tap){u, REST_STEM, (size_t)(track - 1)};
 	u->watching_stream = true;
 	u->watch_start_ns = now;
 	u->stream_heard_ns = now;
 	u->stems_heard_ns = 0;
 	u->status.stream_track = track;
 	u->stream_status_dirty = true;
-	if (u->sources_mode) {
-		// The mixer taps the track itself and reports its level with every pushed tick.
-		pthread_mutex_unlock(&u->mu);
-		blog(LOG_INFO, "[faders] streamed track is Track %d (sources mode)", track);
-		return;
-	}
-	// The streamed track joins as the 4th stem; every ring restarts so the stems stay aligned.
-	u->n_stems = REST_STEM + 1;
-	u->stems_dirty = true;
-	reset_rings(u);
 	pthread_mutex_unlock(&u->mu);
-	// Unclamped, so track − (voice + game + music) is exact even when the track clips.
-	struct audio_convert_info conv = {.samples_per_sec = SAMPLE_RATE, .format = AUDIO_FORMAT_FLOAT, .speakers = SPEAKERS_STEREO, .allow_clipping = true};
-	obs_add_raw_audio_callback(u->stream_tap.mix_idx, &conv, on_audio, &u->stream_tap);
-	blog(LOG_INFO, "[faders] watching Track %d (streamed audio): silence check, and its remainder goes out as \"Everything else\"", track);
+	blog(LOG_INFO, "[faders] streamed track is Track %d: silence check on, Everything else measured against it", track);
 }

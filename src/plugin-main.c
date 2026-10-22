@@ -10,9 +10,8 @@
  */
 // Faders OBS plugin: sends your audio as separate layers (faders) so viewers can mix them.
 //
-// Two mixer modes. Sources (default since 0.4.0): each fader is a set of OBS sources, mixed by
-// the plugin from per-source audio (mixer.c), plus "Everything else"; no OBS tracks involved.
-// Tracks (legacy): faders are OBS mixer tracks 2/3/4 (uplink.c taps them).
+// Each fader is a set of OBS sources, mixed by the plugin from per-source audio (mixer.c),
+// plus "Everything else"; no OBS tracks are involved.
 //
 // UI without Qt code: a private "Faders" source holds the settings, and Tools → Faders opens
 // OBS's own properties window for it. Settings persist in the plugin's config folder.
@@ -42,9 +41,7 @@ MODULE_EXPORT const char *obs_module_description(void)
 // server isn't shown in the settings; tests point it elsewhere through faders_configure.
 #define DEFAULT_SERVER "wss://hub.faders.tv/ingest"
 // Settings keys (settings.json in the plugin's config folder).
-#define S_MODE "mixer_mode" // "sources" | "tracks"
-#define S_FADERS "faders"   // editable list: [{"value":"Voice"},…]
-#define S_MIGRATED "migrated_from_tracks"
+#define S_FADERS "faders" // editable list: [{"value":"Voice"},…]
 #define SRC_PREFIX "src:" // per-source dropdowns in the dialog: "src:<uuid>" → fader name / "~rest" / "~auto"
 #define CHOICE_REST "~rest"
 #define CHOICE_AUTO "~auto"
@@ -58,16 +55,11 @@ static bool frontend_loaded;
 static int forced_stream_track; // headless tests: faders_watch_stream_track
 static int forced_transition_ms; // headless tests: faders_transition_duration
 static int max_stems_seen = FDR_MAX_FADERS;
-static bool sources_fallback; // sources mode asked for but unavailable (non-stereo output)
+static bool mixer_unavailable; // the OBS audio output isn't stereo 48 kHz: nothing runs
 
 static char *config_file(void)
 {
 	return obs_module_config_path("settings.json");
-}
-
-static bool sources_mode(obs_data_t *s)
-{
-	return strcmp(obs_data_get_string(s, S_MODE), "tracks") != 0;
 }
 
 // ── Fader names from the settings' editable list ───────────────────────────────────────
@@ -155,31 +147,17 @@ static void apply(obs_data_t *s)
 	mixer = NULL;
 	fdr_uplink_stop(uplink);
 	uplink = NULL;
-	sources_fallback = false;
+	mixer_unavailable = false;
 	if (s && should_run(s)) {
-		bool want_sources = sources_mode(s);
-		fdr_uplink_config cfg = {
-			.server = obs_data_get_string(s, "server"),
-			.key = obs_data_get_string(s, "key"),
-			.names_changed = names_changed,
-			.update_available = update_available,
-			.tracks = {(int)obs_data_get_int(s, "track_voice"), (int)obs_data_get_int(s, "track_game"),
-				   (int)obs_data_get_int(s, "track_music")},
-			.sources_mode = want_sources,
-		};
+		fdr_uplink_config cfg = {.server = obs_data_get_string(s, "server"), .key = obs_data_get_string(s, "key")};
 		int stream_track = stream_audio_track();
-		if (want_sources) {
-			// The mixer needs a stereo, 48 kHz output; otherwise this session runs in tracks mode.
-			uplink = fdr_uplink_start(&cfg);
-			mixer = uplink ? fdr_mixer_start(uplink, stream_track ? stream_track : 1) : NULL;
-			if (uplink && !mixer) {
-				fdr_uplink_stop(uplink);
-				cfg.sources_mode = false;
-				uplink = fdr_uplink_start(&cfg);
-				sources_fallback = true;
-			}
-		} else {
-			uplink = fdr_uplink_start(&cfg);
+		uplink = fdr_uplink_start(&cfg);
+		// The mixer needs a stereo, 48 kHz output; without it nothing is sent.
+		mixer = uplink ? fdr_mixer_start(uplink, stream_track ? stream_track : 1) : NULL;
+		if (uplink && !mixer) {
+			fdr_uplink_stop(uplink);
+			uplink = NULL;
+			mixer_unavailable = true;
 		}
 		if (mixer) {
 			apply_faders(s);
@@ -272,74 +250,20 @@ static void status_text(struct dstr *out)
 {
 	fdr_uplink_status st;
 	get_status(&st);
-	bool sources = mixer != NULL;
-	if (!st.running)
+	if (mixer_unavailable)
+		dstr_copy(out, "Not running: Faders needs stereo, 48 kHz OBS audio (Settings → Audio).");
+	else if (!st.running)
 		dstr_copy(out, streaming ? "Not running. Check your key." : "Idle. Starts when you go live.");
 	else if (!st.connected)
 		dstr_printf(out, "Connecting… %s", st.last_error[0] ? st.last_error : "");
 	else if (st.stream_track_silent)
 		dstr_printf(out, "Connected, but Track %d (what OBS streams) is silent: viewers hear nothing.", st.stream_track);
-	else if (st.mix_mismatch[0] && sources)
-		dstr_printf(out, "Connected. \"%s\" isn't in your stream the way Faders sends it: moved to Everything else.", st.mix_mismatch);
 	else if (st.mix_mismatch[0])
-		dstr_printf(out, "Connected, but %s is sent to Faders and not to your stream (Track %d).", st.mix_mismatch, st.stream_track);
+		dstr_printf(out, "Connected. \"%s\" isn't in your stream the way Faders sends it: moved to Everything else.", st.mix_mismatch);
 	else if (st.listeners == 0)
-		dstr_printf(out, "Connected. Paused until a viewer turns Faders on. %d layers%s.", st.stems, sources && st.stream_track ? "; Faders mix matches your stream" : "");
+		dstr_printf(out, "Connected. Paused until a viewer turns Faders on. %d layers%s.", st.stems, st.stream_track ? "; Faders mix matches your stream" : "");
 	else
-		dstr_printf(out, "Connected. %d listener%s, %d kbps, %d layers%s.", st.listeners, st.listeners == 1 ? "" : "s", st.uplink_kbps, st.stems, sources && st.stream_track ? "; Faders mix matches your stream" : "");
-}
-
-// ── Migration from tracks mode (first run of 0.4.0 on an existing install) ─────────────
-
-struct migrate {
-	int tracks[3];
-	int moved;
-	struct dstr summary;
-};
-
-static bool migrate_cb(void *param, obs_source_t *s)
-{
-	struct migrate *mg = param;
-	uint32_t flags = obs_source_get_output_flags(s);
-	if (!(flags & OBS_SOURCE_AUDIO) || (flags & OBS_SOURCE_COMPOSITE))
-		return true;
-	static const char *const names[] = {"Voice", "Game", "Music"};
-	uint32_t mixers = obs_source_get_audio_mixers(s);
-	const char *fader = NULL;
-	for (int i = 0; i < 3 && !fader; i++)
-		if (mg->tracks[i] >= 1 && mg->tracks[i] <= 6 && (mixers & (1u << (mg->tracks[i] - 1))))
-			fader = names[i];
-	obs_data_t *priv = obs_source_get_private_settings(s);
-	if (!obs_data_has_user_value(priv, FDR_FADER_SETTING)) {
-		// On a Faders track → that fader; on none → Everything else (what it was for listeners).
-		obs_data_set_string(priv, FDR_FADER_SETTING, fader ? fader : "");
-		mg->moved++;
-		dstr_catf(&mg->summary, "%s\"%s\" → %s", mg->moved > 1 ? ", " : "", obs_source_get_name(s), fader ? fader : "Everything else");
-	}
-	obs_data_release(priv);
-	return true;
-}
-
-// Called once the scene collection is loaded (sources exist). Writes the assignments the track
-// matrix implied, switches to sources mode, and logs what it did.
-static void migrate_if_needed(void)
-{
-	if (!settings_source)
-		return;
-	obs_data_t *s = obs_source_get_settings(settings_source);
-	bool legacy = obs_data_has_user_value(s, "track_voice") && !obs_data_has_user_value(s, S_MODE) && !obs_data_get_bool(s, S_MIGRATED);
-	if (legacy) {
-		struct migrate mg = {{(int)obs_data_get_int(s, "track_voice"), (int)obs_data_get_int(s, "track_game"), (int)obs_data_get_int(s, "track_music")}, 0, {0}};
-		obs_enum_sources(migrate_cb, &mg);
-		obs_data_t *upd = obs_data_create();
-		obs_data_set_string(upd, S_MODE, "sources");
-		obs_data_set_bool(upd, S_MIGRATED, true);
-		obs_source_update(settings_source, upd); // persists and applies
-		obs_data_release(upd);
-		blog(LOG_INFO, "[faders] switched to sources mode: %d source(s) assigned from your tracks (voice=%d game=%d music=%d)%s%s. Your Faders tracks are no longer needed.", mg.moved, mg.tracks[0], mg.tracks[1], mg.tracks[2], mg.moved ? ": " : "", mg.summary.array ? mg.summary.array : "");
-		dstr_free(&mg.summary);
-	}
-	obs_data_release(s);
+		dstr_printf(out, "Connected. %d listener%s, %d kbps, %d layers%s.", st.listeners, st.listeners == 1 ? "" : "s", st.uplink_kbps, st.stems, st.stream_track ? "; Faders mix matches your stream" : "");
 }
 
 // ── Settings source (properties window) ─────────────────────────────────────────────────
@@ -366,34 +290,10 @@ static void src_defaults(obs_data_t *s)
 	obs_data_set_default_bool(s, "enabled", true);
 	obs_data_set_default_string(s, "server", DEFAULT_SERVER);
 	obs_data_set_default_bool(s, "only_live", true);
-	obs_data_set_default_string(s, S_MODE, "sources");
 	static const char *const defaults[] = {"Voice", "Game", "Music"};
 	obs_data_array_t *arr = names_array(defaults, 3);
 	obs_data_set_default_array(s, S_FADERS, arr);
 	obs_data_array_release(arr);
-	obs_data_set_default_int(s, "track_voice", 2);
-	obs_data_set_default_int(s, "track_game", 3);
-	obs_data_set_default_int(s, "track_music", 4);
-}
-
-static void add_track_list(obs_properties_t *props, const char *name, const char *label)
-{
-	obs_property_t *p = obs_properties_add_list(props, name, label, OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-	for (int t = 1; t <= 6; t++) {
-		char text[16];
-		snprintf(text, sizeof(text), "Track %d", t);
-		obs_property_list_add_int(p, text, t);
-	}
-}
-
-static bool mode_modified(obs_properties_t *props, obs_property_t *p, obs_data_t *settings)
-{
-	UNUSED_PARAMETER(p);
-	bool tracks = !sources_mode(settings);
-	obs_property_set_visible(obs_properties_get(props, "tracks"), tracks);
-	obs_property_set_visible(obs_properties_get(props, "faders_group"), !tracks);
-	obs_property_set_visible(obs_properties_get(props, "sources_group"), !tracks);
-	return true;
 }
 
 struct source_rows {
@@ -469,7 +369,7 @@ static obs_properties_t *src_properties(void *data)
 		dstr_printf(&warn,
 			    "Twitch is getting no audio: Track %d, the one OBS streams, is silent. In Edit → Advanced "
 			    "Audio Properties, tick Track %d for your mic, game and music. "
-			    "<a href=\"https://faders.tv/docs/obs-tracks/\">How to set up tracks</a>",
+			    "<a href=\"" DOCS_URL "\">Setup guide</a>",
 			    now_st.stream_track, now_st.stream_track);
 		obs_property_t *w = obs_properties_add_text(props, "stream_silent", warn.array, OBS_TEXT_INFO);
 		obs_property_text_set_info_type(w, OBS_TEXT_INFO_ERROR);
@@ -478,27 +378,19 @@ static obs_properties_t *src_properties(void *data)
 	}
 	if (now_st.mix_mismatch[0]) {
 		struct dstr warn = {0};
-		if (mixer)
-			dstr_printf(&warn,
-				    "\"%s\" is sent to Faders but isn't in your stream the same way (not on Track %d, captured twice, or "
-				    "monitor-only), so it has been moved to Everything else for this session. Fix the source, then "
-				    "restart the stream or the plugin. <a href=\"" DOCS_URL "\">How to assign sources</a>",
-				    now_st.mix_mismatch, now_st.stream_track);
-		else
-			dstr_printf(&warn,
-				    "Your %s layer is sent to Faders but is not in Track %d, the one OBS streams, so viewers "
-				    "can't hear it from the stream and the extension can't line it up. In Edit → Advanced Audio "
-				    "Properties, tick Track %d for that source as well as its Faders track. "
-				    "<a href=\"https://faders.tv/docs/obs-tracks/\">How to set up tracks</a>",
-				    now_st.mix_mismatch, now_st.stream_track, now_st.stream_track);
+		dstr_printf(&warn,
+			    "\"%s\" is sent to Faders but isn't in your stream the same way (not on Track %d, captured twice, or "
+			    "monitor-only), so it has been moved to Everything else for this session. Fix the source, then "
+			    "restart the stream or the plugin. <a href=\"" DOCS_URL "\">How to assign sources</a>",
+			    now_st.mix_mismatch, now_st.stream_track);
 		obs_property_t *w = obs_properties_add_text(props, "mix_mismatch", warn.array, OBS_TEXT_INFO);
 		obs_property_text_set_info_type(w, OBS_TEXT_INFO_WARNING);
 		obs_property_text_set_info_word_wrap(w, true);
 		dstr_free(&warn);
 	}
-	if (sources_fallback) {
-		obs_property_t *w = obs_properties_add_text(props, "fallback", "Faders is using OBS tracks for this session: assigning sources needs stereo, 48 kHz OBS audio (Settings → Audio).", OBS_TEXT_INFO);
-		obs_property_text_set_info_type(w, OBS_TEXT_INFO_WARNING);
+	if (mixer_unavailable) {
+		obs_property_t *w = obs_properties_add_text(props, "unavailable", "Faders isn't running: it needs stereo, 48 kHz OBS audio (Settings → Audio → Channels and Sample Rate).", OBS_TEXT_INFO);
+		obs_property_text_set_info_type(w, OBS_TEXT_INFO_ERROR);
 		obs_property_text_set_info_word_wrap(w, true);
 	}
 
@@ -516,6 +408,7 @@ static obs_properties_t *src_properties(void *data)
 	// An info row renders as a QLabel with external links enabled: a real hyperlink that opens the
 	// browser directly (a URL button asks "Open this URL?" first).
 	obs_properties_add_text(props, "portal", "<a href=\"" PORTAL_URL "\">Open the Faders portal to get key</a>", OBS_TEXT_INFO);
+	obs_properties_add_bool(props, "only_live", "Only send while streaming");
 
 	// ── Faders: the list of names viewers get, capped by the plan ──────────────────────
 	obs_properties_t *faders = obs_properties_create();
@@ -540,24 +433,8 @@ static obs_properties_t *src_properties(void *data)
 	if (!rows.rows)
 		obs_properties_add_text(sources, "no_sources", "No audio sources in this scene collection yet.", OBS_TEXT_INFO);
 	obs_properties_add_group(props, "sources_group", "Sources (which fader each one belongs to)", OBS_GROUP_NORMAL, sources);
+	obs_properties_add_text(props, "version", "Faders plugin " FDR_VERSION_STR, OBS_TEXT_INFO);
 
-	// ── Advanced: mode, and the legacy track dropdowns ────────────────────────────────
-	obs_properties_t *adv = obs_properties_create();
-	obs_property_t *mode = obs_properties_add_list(adv, S_MODE, "Mixer", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
-	obs_property_list_add_string(mode, "Sources (assign sources to faders here)", "sources");
-	obs_property_list_add_string(mode, "Tracks (legacy: OBS tracks 2/3/4 are voice/game/music)", "tracks");
-	obs_property_set_modified_callback(mode, mode_modified);
-	obs_properties_add_bool(adv, "only_live", "Only send while streaming");
-	obs_properties_add_text(adv, "version", "Faders plugin " FDR_VERSION_STR, OBS_TEXT_INFO);
-	obs_properties_add_group(props, "advanced", "Advanced", OBS_GROUP_NORMAL, adv);
-
-	obs_properties_t *tracks = obs_properties_create();
-	add_track_list(tracks, "track_voice", "Voice");
-	add_track_list(tracks, "track_game", "Game");
-	add_track_list(tracks, "track_music", "Music");
-	obs_properties_add_group(props, "tracks", "Audio tracks (tracks mode; assign sources in Edit → Advanced Audio Properties)", OBS_GROUP_NORMAL, tracks);
-
-	mode_modified(props, mode, settings);
 	obs_data_release(settings);
 	return props;
 }
@@ -597,7 +474,7 @@ static void src_update(void *data, obs_data_t *settings)
 	bfree(path);
 	// A change of names or assignments while running doesn't need a restart.
 	pthread_mutex_lock(&uplink_mu);
-	bool live = uplink && mixer && sources_mode(settings) && obs_data_get_bool(settings, "enabled");
+	bool live = uplink && mixer && obs_data_get_bool(settings, "enabled");
 	if (live)
 		apply_faders(settings);
 	pthread_mutex_unlock(&uplink_mu);
@@ -645,7 +522,6 @@ static void on_frontend_event(enum obs_frontend_event event, void *unused)
 	switch (event) {
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
 		frontend_loaded = true;
-		migrate_if_needed();
 		apply_current();
 		announce_update();
 		break;
@@ -655,7 +531,6 @@ static void on_frontend_event(enum obs_frontend_event event, void *unused)
 		pthread_mutex_unlock(&uplink_mu);
 		break;
 	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED:
-		migrate_if_needed();
 		pthread_mutex_lock(&uplink_mu);
 		fdr_mixer_rebuild(mixer);
 		pthread_mutex_unlock(&uplink_mu);
@@ -685,8 +560,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *unused)
 }
 
 // ── Scripting / automation procedures (also used by the headless tests) ─────────────────
-// faders_configure(server, key, voice, game, music, only_live): tracks mode.
-// faders_configure_sources(server, key, faders, only_live): sources mode; faders = comma list.
+// faders_configure(server, key, faders, only_live): faders = comma list ("Voice,Game,Music").
 // faders_assign(source, fader): fader name, "" = Everything else, "auto".
 // faders_watch_stream_track(track) · faders_status(out status) · faders_mixer_stats(out json)
 
@@ -707,25 +581,6 @@ static void proc_configure(void *unused, calldata_t *cd)
 	obs_data_set_bool(s, "enabled", true);
 	obs_data_set_string(s, "server", calldata_string(cd, "server"));
 	obs_data_set_string(s, "key", calldata_string(cd, "key"));
-	obs_data_set_string(s, S_MODE, "tracks");
-	obs_data_set_bool(s, S_MIGRATED, true);
-	obs_data_set_int(s, "track_voice", calldata_int(cd, "voice"));
-	obs_data_set_int(s, "track_game", calldata_int(cd, "game"));
-	obs_data_set_int(s, "track_music", calldata_int(cd, "music"));
-	obs_data_set_bool(s, "only_live", calldata_bool(cd, "only_live"));
-	obs_source_update(settings_source, s); // persists and applies via src_update
-	obs_data_release(s);
-}
-
-static void proc_configure_sources(void *unused, calldata_t *cd)
-{
-	UNUSED_PARAMETER(unused);
-	obs_data_t *s = obs_data_create();
-	obs_data_set_bool(s, "enabled", true);
-	obs_data_set_string(s, "server", calldata_string(cd, "server"));
-	obs_data_set_string(s, "key", calldata_string(cd, "key"));
-	obs_data_set_string(s, S_MODE, "sources");
-	obs_data_set_bool(s, S_MIGRATED, true);
 	obs_data_set_bool(s, "only_live", calldata_bool(cd, "only_live"));
 	// "Voice,Game,Music,Discord"
 	char list[512];
@@ -813,8 +668,7 @@ bool obs_module_load(void)
 	proc_handler_t *ph = obs_get_proc_handler();
 	// Headless tests have no streaming output: point the streamed-track check at a track directly.
 	proc_handler_add(ph, "void faders_watch_stream_track(in int track)", proc_watch_stream_track, NULL);
-	proc_handler_add(ph, "void faders_configure(in string server, in string key, in int voice, in int game, in int music, in bool only_live)", proc_configure, NULL);
-	proc_handler_add(ph, "void faders_configure_sources(in string server, in string key, in string faders, in bool only_live)", proc_configure_sources, NULL);
+	proc_handler_add(ph, "void faders_configure(in string server, in string key, in string faders, in bool only_live)", proc_configure, NULL);
 	proc_handler_add(ph, "void faders_assign(in string source, in string fader)", proc_assign, NULL);
 	proc_handler_add(ph, "void faders_status(out string status)", proc_status, NULL);
 	proc_handler_add(ph, "void faders_mixer_stats(out string json)", proc_mixer_stats, NULL);

@@ -5,52 +5,51 @@ All binary fields little-endian. One binary WebSocket message = one chunk (500 m
 ```
 offset size field
 0      1    version      (1)
-1      1    stemCount    (up to 16: the configured faders + "Everything else"; 3 or 4 in tracks mode)
+1      1    stemCount    (up to 16: the configured faders + "Everything else")
 2      4    seq          u32, increments by 1 per chunk
 6      8    tsMs         f64, stream clock of the chunk's first sample
 14     2    frameMs      u16, Opus frame duration (20)
-16     ...  per stem:    u8 stemId (the index in the plugin's stems message; 0 voice, 1 game, 2 music, 3 everything else in tracks mode)
+16     ...  per stem:    u8 stemId (the index in the plugin's stems message)
                          u16 nFrames (25, or 0: this stem is silent for the whole chunk)
                          nFrames × (u16 len, len bytes raw Opus packet)
 ```
 
-Opus packets are 48 kHz stereo (plugin 0.2.0+; earlier plugins sent mono, which players decode as stereo).
-`nFrames = 0` (plugin 0.3.0+) means "present and silent": the stem's whole 500 ms peaked below
-−60 dBFS, so no Opus frames are sent for it. Players treat it as a chunk of silence.
+Opus packets are 48 kHz stereo. `nFrames = 0` means "present and silent": the stem's whole
+500 ms peaked below −60 dBFS, so no Opus frames are sent for it. Players treat it as a chunk of
+silence.
 
 Text (JSON) control messages:
 
 | Direction        | Message                                                      | Meaning                                   |
 |------------------|--------------------------------------------------------------|-------------------------------------------|
 | hub → plugin     | `{"type":"listeners","n":3}`                                 | listener count; plugin pauses uplink at 0 |
-| hub → plugin     | `{"type":"quality","kbps":192,"maxStems":4}`                 | kbps per stem (plan-capped); default 128. `maxStems`: faders the plan allows, not counting Everything else (plugin 0.4.0+ folds faders past it into Everything else; 0.3.0 only reads it) |
-| hub → plugin     | `{"type":"update","latest":"0.3.0"}`                         | a newer plugin release is published       |
-| plugin → hub     | `{"type":"stems","stems":[{"id":0,"name":"Voice"},…,{"id":3,"name":"Everything else","rest":true}]}` | the stem list, on every connect and whenever it changes, before any chunk with that layout. `rest` marks the residual (the streamed track minus the other stems). Without it (plugins ≤ 0.2) the list is voice/game/music, ids 0–2 |
-| plugin → hub     | `{"type":"status","streamAudio":"ok"|"silent","track":1,"mixMismatch":"game"}` | the track OBS streams: silent while the Faders layers have sound (0.1.1+); `mixMismatch` (0.3.0+): a layer (tracks mode) or a source name (sources mode, 0.4.0+) sent to Faders that isn't in the streamed track (omitted when fine) |
+| hub → plugin     | `{"type":"quality","kbps":192,"maxStems":4}`                 | kbps per stem (plan-capped); default 128. `maxStems`: faders the plan allows, not counting Everything else (faders past it are folded into Everything else) |
+| hub → plugin     | `{"type":"update","latest":"0.4.0"}`                         | a newer plugin release is published       |
+| plugin → hub     | `{"type":"stems","stems":[{"id":0,"name":"Voice"},…,{"id":3,"name":"Everything else","rest":true}]}` | the stem list, on every connect and whenever it changes, before any chunk with that layout. `rest` marks the residual (the streamed track minus the other stems); it is always last |
+| plugin → hub     | `{"type":"status","streamAudio":"ok"|"silent","track":1,"mixMismatch":"Discord"}` | the track OBS streams: silent while the Faders layers have sound; `mixMismatch`: a source name sent to Faders that isn't in the streamed track the same way (omitted when fine) |
 | hub → listener   | `{"type":"stems",…}`                                         | the plugin's stem list, on attach (before `backlog`) and when it changes |
 | hub → listener   | `{"type":"backlog","count":120}`                             | next `count` binary chunks are history    |
 | hub → listener   | `{"type":"live"}`                                            | following chunks are live                 |
 
 The hub never parses Opus. It reads `seq`/`tsMs` only, keeps a 60 s ring per channel, and fans chunks out byte-for-byte.
 
-## Everything else (plugin 0.3.0, tracks mode)
+## Everything else
 
-While OBS streams, the plugin taps the streamed track unclamped (`allow_clipping`) alongside the
-three Faders tracks and sends `track − (voice + game + music)` as stem 3, "Everything else":
-alerts, transitions, anything not on a Faders track. With every source on both, it is silent and
-costs nothing on the wire (`nFrames = 0`). The sum of all four stems is the streamed track.
+The plugin taps the streamed track unclamped (`allow_clipping`) and sends `track − Σ faders` as
+the last stem, "Everything else": alerts, transitions, anything in no fader. With every source
+in a fader it is silent and costs nothing on the wire (`nFrames = 0`). The sum of all stems is
+the streamed track, sample for sample.
 
-The residual is also an oracle: per chunk, the plugin correlates it with each stem. |r| > 0.5 for
-three chunks in a row means that stem's audio is in the residual, i.e. the source is on a
-Faders track but not on the streamed track (viewers can't hear it from the stream and the
-extension can't line it up). The plugin logs it, shows it in Tools → Faders, and reports it in
-the `status` message (`mixMismatch`); it clears after three matching chunks. Quiet chunks
-(either side below −60 dBFS) are no evidence either way.
+The residual is also an oracle: per window, the plugin correlates it with every included source.
+|r| > 0.5 three windows in a row means that source's audio is in the residual, i.e. it is sent to
+Faders but is not in the streamed track the same way (muted or off the track for Twitch, captured
+twice, monitor-only). The plugin moves it to Everything else for the session, logs it, shows it in
+Tools → Faders, and reports it in the `status` message (`mixMismatch`).
 
-## Virtual mixer (faders-obs 0.4, verified with `faders-mixcheck` against libobs 32.2.2)
+## Virtual mixer: libobs facts (verified with `faders-mixcheck` against libobs 32.2.2)
 
-The plugin will stop consuming OBS tracks and build each Faders layer itself from per-source
-audio, plus a residual "Everything else" layer so that Σ layers == the streamed track exactly.
+The plugin consumes no OBS tracks: it builds each Faders layer itself from per-source audio,
+plus a residual "Everything else" layer so that Σ layers == the streamed track exactly.
 `test/mixcheck.c` (CI target `faders-mixcheck`) proves the libobs behaviour this relies on; it
 runs headless with synthetic tone sources and fails the build if any check fails. Findings:
 
@@ -101,11 +100,11 @@ runs headless with synthetic tone sources and fails the build if any check fails
 - **Monitor Only** sources never reach `audio_output_buf` (libobs skips them in
   `source_output_audio_data`), so they are absent from both the track and the buffers.
 
-Phase 3 therefore uses `obs_source_get_audio_mix()` from the track raw callback (not the
+The mixer therefore uses `obs_source_get_audio_mix()` from the track raw callback (not the
 capture-callback fallback), with the timestamp rule above for alignment and `obs_source_active`
 + track bits + `audio_pending` as the gate.
 
-## Sources mode (plugin 0.4.0): how the mixer works
+## How the mixer works
 
 `src/mixer.c`. One raw audio callback on the track OBS streams (float planar, 48 kHz stereo,
 `allow_clipping`). Per tick, for every audio input source in the collection (a snapshot the main

@@ -41,38 +41,24 @@ M="$PWD/test/media"
 build/faders-headless "ws://127.0.0.1:$PORT/ingest/ci_channel" wrong-key "$M/voice.wav" "$M/game.wav" "$M/music.wav" 5 > host-badkey.log 2>&1 || true
 grep -q "HTTP 401" host-badkey.log || { echo "##teamcity[buildProblem description='wrong key was not rejected with HTTP 401']"; exit 1; }
 
-build/faders-headless "ws://127.0.0.1:$PORT/ingest/ci_channel" dev-token "$M/voice.wav" "$M/game.wav" "$M/music.wav" 40 > host.log 2>&1 &
+# The wire as a listener sees it: three named faders plus Everything else, which is silent while
+# every source is in a fader (the subtraction is exact)...
+build/faders-headless "ws://127.0.0.1:$PORT/ingest/ci_channel" dev-token "$M/voice.wav" "$M/game.wav" "$M/music.wav" 30 > host.log 2>&1 &
 HOST=$!
 sleep 6
-node test/plugin-listener.mjs --server "ws://127.0.0.1:$PORT" --channel ci_channel --seconds 20
+node test/plugin-listener.mjs --server "ws://127.0.0.1:$PORT" --channel ci_channel --seconds 15 --stems 4 --names "Voice,Game,Music,rest"
 wait $HOST || true
 
-# With the streamed track watched, a 4th stem carries "Everything else" = that track minus the
-# three Faders tracks. With every source on both it must be silent (the subtraction is exact)...
-FADERS_STREAM_TRACK=1 build/faders-headless "ws://127.0.0.1:$PORT/ingest/ci_channel" dev-token "$M/voice.wav" "$M/game.wav" "$M/music.wav" 30 > host-rest-silent.log 2>&1 &
+# ...and carries a source that is in no fader.
+FADERS_EXTRA_WAV="$M/voice.wav" build/faders-headless "ws://127.0.0.1:$PORT/ingest/ci_channel" dev-token "$M/voice.wav" "$M/game.wav" "$M/music.wav" 30 > host-rest.log 2>&1 &
 HOST=$!
 sleep 6
-node test/plugin-listener.mjs --server "ws://127.0.0.1:$PORT" --channel ci_channel --seconds 15 --stems 4
+node test/plugin-listener.mjs --server "ws://127.0.0.1:$PORT" --channel ci_channel --seconds 15 --stems 4 --names "Voice,Game,Music,rest" --rest-audible
 wait $HOST || true
+grep -q '"mixMismatch"' hub.log && { echo "##teamcity[buildProblem description='mixMismatch reported although every fader source is on the streamed track']"; exit 1; }
 
-# ...and with a source on the streamed track only, that source is what it carries.
-FADERS_STREAM_TRACK=1 FADERS_EXTRA_WAV="$M/voice.wav" build/faders-headless "ws://127.0.0.1:$PORT/ingest/ci_channel" dev-token "$M/voice.wav" "$M/game.wav" "$M/music.wav" 30 > host-rest.log 2>&1 &
-HOST=$!
-sleep 6
-node test/plugin-listener.mjs --server "ws://127.0.0.1:$PORT" --channel ci_channel --seconds 15 --stems 4 --rest-audible
-wait $HOST || true
-grep -q '"mixMismatch"' hub.log && { echo "##teamcity[buildProblem description='mixMismatch reported although every Faders source is on the streamed track']"; exit 1; }
-
-# A Faders source missing from the streamed track: the plugin reports which one within seconds.
-FADERS_STREAM_TRACK=1 FADERS_OFF_STREAM=game build/faders-headless "ws://127.0.0.1:$PORT/ingest/ci_channel" dev-token "$M/voice.wav" "$M/game.wav" "$M/music.wav" 16 > host-mismatch.log 2>&1 &
-HOST=$!
-node test/plugin-listener.mjs --server "ws://127.0.0.1:$PORT" --channel ci_channel --seconds 12 --stems 4 --rest-audible
-wait $HOST || true
-grep -q '"mixMismatch":"game"' hub.log || { tail -5 hub.log; echo "##teamcity[buildProblem description='the plugin did not report the game track missing from the streamed track']"; exit 1; }
-grep -q '"mixMismatch":"voice"\|"mixMismatch":"music"' hub.log && { echo "##teamcity[buildProblem description='mixMismatch named a stem that is on the streamed track']"; exit 1; }
-
-# Sources mode (the virtual mixer, 0.4.0): every case of the mixing matrix through the real
-# plugin (test/mixtest.c), then the wire as a listener sees it (named stems + Everything else).
+# Every case of the mixing matrix through the real plugin (test/mixtest.c), then the wire with
+# five faders as a listener sees it.
 build/faders-mixtest "ws://127.0.0.1:$PORT/ingest/mix_channel" dev-token > mixtest.log 2>&1 || { grep -E "^(PASS|FAIL|SKIP)" mixtest.log; echo "##teamcity[buildProblem description='faders-mixtest: a virtual-mixer case failed']"; exit 1; }
 grep -E "^(PASS|FAIL|SKIP)" mixtest.log
 grep -q '"mixMismatch":"injected"' hub.log || { echo "##teamcity[buildProblem description='the injected mismatch was not reported to the hub']"; exit 1; }
@@ -101,7 +87,7 @@ for _ in $(seq 1 30); do curl -s "localhost:$Q_PORT/health" | grep -q ok && brea
 build/faders-headless "ws://127.0.0.1:$Q_PORT/ingest/ci_channel" dev-token "$M/voice.wav" "$M/game.wav" "$M/music.wav" 30 > host-quality.log 2>&1 &
 QHOST=$!
 sleep 6
-node test/plugin-listener.mjs --server "ws://127.0.0.1:$Q_PORT" --channel ci_channel --seconds 15 --kbps 256
+node test/plugin-listener.mjs --server "ws://127.0.0.1:$Q_PORT" --channel ci_channel --seconds 15 --kbps 256 --stems 4
 
 rm -f faders-obs-*-macos.zip faders-obs-*-macos.pkg # earlier versions' installers stay in the checkout
 ./scripts/package-macos.sh

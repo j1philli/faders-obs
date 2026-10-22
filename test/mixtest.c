@@ -8,7 +8,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
-// faders-mixtest: the virtual mixer (sources mode) end to end, headless: real libobs, the real
+// faders-mixtest: the virtual mixer end to end, headless: real libobs, the real
 // plugin, synthetic tone sources with distinct levels, and the plugin's own "faders_mixer_stats"
 // procedure for what each fader and Everything else carried. One PASS/FAIL line per case; exits
 // non-zero if any fails. CI runs it (scripts/ci/teamcity-macos.sh).
@@ -281,14 +281,14 @@ int main(int argc, char **argv)
 		fprintf(stderr, "failed to load %s\n", FADERS_PLUGIN_BIN);
 		return 1;
 	}
-	// Sources mode with four faders; the streamed track is track 1 (no streaming output here).
+	// Four faders; the streamed track is track 1 (no streaming output here).
 	{
 		calldata_t cd = {0};
 		calldata_set_string(&cd, "server", argv[1]);
 		calldata_set_string(&cd, "key", argv[2]);
 		calldata_set_string(&cd, "faders", "Voice,Game,Music,Discord");
 		calldata_set_bool(&cd, "only_live", false);
-		call("faders_configure_sources", &cd);
+		call("faders_configure", &cd);
 		calldata_free(&cd);
 		calldata_t wc = {0};
 		calldata_set_int(&wc, "track", 1);

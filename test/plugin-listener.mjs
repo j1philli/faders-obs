@@ -3,7 +3,7 @@
 // Listens to a channel on the hub and checks what the OBS plugin sends: well-formed chunks
 // (every announced stem × 25 Opus frames, consecutive seqs) carrying real audio (not silence).
 //   node plugin-listener.mjs --server ws://localhost:8787 --channel <name> [--seconds 20] [--kbps 128]
-//                            [--stems 3] [--names voice,game,music,rest] [--rest-audible]
+//                            [--stems 4] [--names voice,game,music,rest] [--rest-audible]
 // --kbps: the per-track bitrate the plugin should be sending (its default, or what the hub asked for).
 // --stems: how many stems the plugin must announce ({"type":"stems"}, before the first live chunk).
 // --rest-audible: the "Everything else" stem must carry audio (the headless host puts a source on
@@ -17,9 +17,9 @@ const { values: args } = parseArgs({
     channel: { type: "string" },
     seconds: { type: "string", default: "20" },
     kbps: { type: "string", default: "128" },
-    stems: { type: "string", default: "3" },
+    stems: { type: "string", default: "4" },
     "rest-audible": { type: "boolean", default: false },
-    // The announced names, lower-case, "rest" for the Everything else stem (plugin 0.4.0 sources mode).
+    // The announced names, lower-case, "rest" for the Everything else stem.
     names: { type: "string" },
   },
 });
@@ -75,9 +75,9 @@ if (chunks.some((c) => !c.parsedAll)) fail.push("malformed chunk (bytes left ove
 if (!announced) fail.push("no stems message from the plugin");
 else if (announced.length !== expectStems) fail.push(`plugin announced ${announced.length} stems, expected ${expectStems}`);
 else if (!stemsBeforeAudio) fail.push("stems message arrived after the first chunk");
-const names = announced ? announced.map((s) => (s.rest ? "rest" : s.name.toLowerCase())) : ["voice", "game", "music"];
+const names = announced ? announced.map((s) => (s.rest ? "rest" : s.name.toLowerCase())) : [];
 const restId = announced?.find((s) => s.rest)?.id ?? -1;
-if (expectStems > 3 && restId !== expectStems - 1) fail.push(`the last stem should be the rest stem (${JSON.stringify(announced)})`);
+if (announced && restId !== announced.length - 1) fail.push(`the last stem should be the rest stem (${JSON.stringify(announced)})`);
 if (args.names && names.join(",") !== args.names.toLowerCase()) fail.push(`stems announced as ${names.join(",")}, expected ${args.names}`);
 // Every stem is present with 25 frames, or marked silent (0 frames: its whole chunk was below -60 dBFS).
 if (chunks.some((c) => c.stems.length !== expectStems || c.stems.some((s) => s.frames !== 25 && s.frames !== 0))) fail.push(`chunk without ${expectStems} stems × 25 (or 0) frames`);
@@ -94,7 +94,7 @@ if (restId >= 0) {
 }
 // The busiest stem runs close to the target bitrate (VBR: quieter stems use less).
 const expectBytes = (Number(args.kbps) * 1000 * 0.02) / 8;
-const busiest = Math.max(...perStem.slice(0, 3));
+const busiest = Math.max(...perStem.filter((_, id) => id !== restId), 0);
 if (busiest < expectBytes * 0.8 || busiest > expectBytes * 1.2) fail.push(`busiest stem at ${busiest.toFixed(0)} bytes/frame, expected ~${expectBytes} for ${args.kbps} kbps`);
 
 console.log(JSON.stringify({ chunks: chunks.length, avgChunkBytes: Math.round(chunks.reduce((n, c) => n + c.size, 0) / Math.max(1, chunks.length)), stems: names, bytesPerFrame: Object.fromEntries(perStem.map((b, i) => [names[i], +b.toFixed(1)])), gaps, result: fail.length ? "FAIL" : "PASS", fail }, null, 2));

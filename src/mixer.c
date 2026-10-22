@@ -785,11 +785,11 @@ fdr_mixer_t *fdr_mixer_start(fdr_uplink_t *uplink, int stream_track)
 {
 	struct obs_audio_info ai;
 	if (!obs_get_audio_info(&ai) || ai.speakers != SPEAKERS_STEREO) {
-		blog(LOG_WARNING, "[faders] sources mode needs stereo OBS audio (Settings → Audio → Channels); falling back to tracks mode");
+		blog(LOG_WARNING, "[faders] Faders needs stereo OBS audio (Settings → Audio → Channels): not running");
 		return NULL;
 	}
 	if (ai.samples_per_sec != RATE) {
-		blog(LOG_WARNING, "[faders] sources mode needs 48 kHz OBS audio (Settings → Audio → Sample Rate); falling back to tracks mode");
+		blog(LOG_WARNING, "[faders] Faders needs 48 kHz OBS audio (Settings → Audio → Sample Rate): not running");
 		return NULL;
 	}
 	struct fdr_mixer *m = bzalloc(sizeof(*m));

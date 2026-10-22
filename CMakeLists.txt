@@ -96,7 +96,7 @@ if(NOT MSVC)
   target_compile_options(faders PRIVATE -Wall -Wno-unused-parameter $<$<COMPILE_LANGUAGE:C>:-Wno-deprecated-declarations>)
 endif()
 
-# Headless test host: real libobs, no GUI; plays WAVs into tracks 2/3/4 and loads the plugin.
+# Headless test host: real libobs, no GUI; plays WAVs as sources on the streamed track and loads the plugin.
 add_executable(faders-headless test/headless.c)
 target_include_directories(faders-headless PRIVATE ${OBS_INCLUDES})
 target_compile_definitions(faders-headless PRIVATE FADERS_PLUGIN_BIN="${PLUGIN_BIN}" FADERS_PLUGIN_DATA="${PLUGIN_DATA}" FADERS_GRAPHICS_MODULE="${GRAPHICS_MODULE}")
@@ -127,7 +127,7 @@ else()
   endif()
 endif()
 
-# Mixer test: the virtual mixer (sources mode) through the real plugin (test/mixtest.c).
+# Mixer test: the virtual mixer through the real plugin (test/mixtest.c).
 add_executable(faders-mixtest test/mixtest.c)
 target_include_directories(faders-mixtest PRIVATE ${OBS_INCLUDES})
 target_compile_definitions(faders-mixtest PRIVATE FADERS_PLUGIN_BIN="${PLUGIN_BIN}" FADERS_PLUGIN_DATA="${PLUGIN_DATA}" FADERS_GRAPHICS_MODULE="${GRAPHICS_MODULE}" FADERS_OBS_TRANSITIONS_BIN="${OBS_TRANSITIONS_BIN}" FADERS_OBS_TRANSITIONS_DATA="${OBS_TRANSITIONS_DATA}")
