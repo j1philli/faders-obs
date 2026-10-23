@@ -6,7 +6,8 @@
   "license": "GPL-2.0-or-later",
   "scripts": {
     "mock-hub": "node test/mock-hub.mjs",
-    "check": "node test/plugin-listener.mjs --server ws://127.0.0.1:8787 --channel ci_channel"
+    "check": "node test/plugin-listener.mjs --server ws://127.0.0.1:8787 --channel ci_channel",
+    "test:names": "node test/fader-names.mjs"
   },
   "devDependencies": {
     "ws": "^8.18.0"

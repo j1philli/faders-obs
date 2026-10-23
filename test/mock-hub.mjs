@@ -10,16 +10,28 @@ import { createServer } from "node:http";
 import { parseArgs } from "node:util";
 import { WebSocketServer } from "ws";
 
-const { values: args } = parseArgs({ options: { port: { type: "string", default: "8787" }, token: { type: "string", default: "dev-token" }, kbps: { type: "string" } } });
+const { values: args } = parseArgs({ options: { port: { type: "string", default: "8787" }, token: { type: "string", default: "dev-token" }, kbps: { type: "string" }, names: { type: "string" } } });
+const defaultNames = args.names ? JSON.parse(args.names) : { voice: "Voice", game: "Game", music: "Music" };
 const RING_MS = 60_000;
 const channels = new Map(); // name -> { ingest, listeners:Set, ring:[], lastSeq }
 const chan = (name) => {
-  if (!channels.has(name)) channels.set(name, { ingest: null, listeners: new Set(), ring: [], lastSeq: -1 });
+  if (!channels.has(name)) channels.set(name, { ingest: null, listeners: new Set(), ring: [], lastSeq: -1, names: defaultNames });
   return channels.get(name);
 };
 const notify = (c) => c.ingest?.send(JSON.stringify({ type: "listeners", n: c.listeners.size }));
 
-const server = createServer((req, res) => {
+const server = createServer(async (req, res) => {
+  // Test-only control endpoint: the real hub pushes the same message after a portal save.
+  if (req.url === "/names" && req.method === "POST") {
+    let body = "";
+    for await (const part of req) body += part;
+    const { channel, names } = JSON.parse(body);
+    const c = chan(channel);
+    c.names = names;
+    c.ingest?.send(JSON.stringify({ type: "fader-names", names }));
+    for (const ws of c.listeners) ws.send(JSON.stringify({ type: "fader-names", names }));
+    return res.end("ok");
+  }
   if (req.url === "/health") return res.end("ok");
   res.writeHead(404).end();
 });
@@ -42,6 +54,7 @@ server.on("upgrade", (req, socket, head) => {
       c.ingest?.close(4000, "replaced by new ingest connection");
       c.ingest = ws;
       if (args.kbps) ws.send(JSON.stringify({ type: "quality", kbps: Number(args.kbps) }));
+      ws.send(JSON.stringify({ type: "fader-names", names: c.names }));
       notify(c);
       ws.on("message", (data, isBinary) => {
         if (!isBinary || data.length < 16) return;
