@@ -249,7 +249,7 @@ static obs_properties_t *src_properties(void *data)
 		dstr_free(&escaped);
 	}
 	obs_data_release(settings);
-	obs_properties_add_text(tracks, "rename", "<a href=\"" PORTAL_URL "\">Customize fader names in the portal</a> (syncs here and to viewers)", OBS_TEXT_INFO);
+	obs_properties_add_text(tracks, "rename", "<a href=\"" PORTAL_URL "\">Rename tracks in the portal</a> (syncs here and to viewers)", OBS_TEXT_INFO);
 	obs_properties_add_group(props, "tracks", "Audio tracks (assign sources in Edit → Advanced Audio Properties)", OBS_GROUP_NORMAL, tracks);
 
 	obs_properties_add_bool(props, "only_live", "Only send while streaming");

@@ -2,7 +2,7 @@
 
 A plugin for [OBS Studio](https://obsproject.com). Faders isn't affiliated with or endorsed by the OBS Project.
 
-Sends your **voice**, **game** and **music** as three separate layers to the Faders hub so
+Sends three audio tracks that you choose and name to the Faders hub so
 viewers can mix them. Your Twitch stream is not touched.
 
 **Get it:** download the installer from [faders.tv/streamers](https://faders.tv/streamers/) or the
@@ -10,13 +10,13 @@ viewers can mix them. Your Twitch stream is not touched.
 [Faders portal](https://faders.tv/portal/). Setup guide: [faders.tv/docs/streamer-setup](https://faders.tv/docs/streamer-setup/).
 
 - **Tools → Faders** opens the settings (OBS's own properties window, no custom UI code):
-  key (with a link to the portal to get one), which mixer track is voice / game / music, "only
+  key (with a link to the portal to get one), which three mixer tracks viewers can control, "only
   send while streaming". The server is `wss://hub.faders.tv/ingest` (the key identifies the
   channel); tests point it elsewhere with the `faders_configure` procedure.
-- **Custom fader names (0.3.0+):** rename the three layers in the [portal](https://faders.tv/portal/).
+- **Track names (0.3.0+):** rename your audio tracks under **Track names** in the [portal](https://faders.tv/portal/).
   The hub sends the same labels to viewers and this plugin. **Tools → Faders → Audio tracks**
   refreshes while open and remembers labels when disconnected. Names change display labels only;
-  track assignments and the three audio stem IDs stay the same. Older hubs keep the default names.
+  track assignments and the three audio stem IDs stay the same.
 - OBS 32+ shows Faders and its version in **Tools → Plugin Manager** (`data/manifest.json`,
   written from the project version by CMake).
 - Taps OBS mixer tracks with `obs_add_raw_audio_callback` (default tracks 2/3/4). Assign
