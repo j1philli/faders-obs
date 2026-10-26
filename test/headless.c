@@ -122,6 +122,47 @@ static void on_track_audio(void *param, size_t mix_idx, struct audio_data *data)
 	track_rms[mix_idx] = track_rms[mix_idx] * 0.9 + rms * 0.1;
 }
 
+// Stand in for the frontend UI event loop, keeping refresh tasks on the main thread.
+struct ui_task {
+	obs_task_t run;
+	void *param;
+	os_event_t *done;
+	struct ui_task *next;
+};
+static pthread_mutex_t ui_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct ui_task *ui_head, **ui_tail = &ui_head;
+static pthread_t main_thread;
+static void queue_ui_task(obs_task_t run, void *param, bool wait)
+{
+	if (pthread_equal(pthread_self(), main_thread)) { run(param); return; }
+	struct ui_task *task = calloc(1, sizeof(*task));
+	task->run = run;
+	task->param = param;
+	os_event_t *done = NULL;
+	if (wait) os_event_init(&done, OS_EVENT_TYPE_MANUAL);
+	task->done = done;
+	pthread_mutex_lock(&ui_mu);
+	*ui_tail = task;
+	ui_tail = &task->next;
+	pthread_mutex_unlock(&ui_mu);
+	if (done) { os_event_wait(done); os_event_destroy(done); }
+}
+static void pump_ui_tasks(void)
+{
+	pthread_mutex_lock(&ui_mu);
+	struct ui_task *task = ui_head;
+	ui_head = NULL;
+	ui_tail = &ui_head;
+	pthread_mutex_unlock(&ui_mu);
+	while (task) {
+		struct ui_task *next = task->next;
+		task->run(task->param);
+		if (task->done) os_event_signal(task->done);
+		free(task);
+		task = next;
+	}
+}
+
 int main(int argc, char **argv)
 {
 	if (argc < 6) {
@@ -138,6 +179,8 @@ int main(int argc, char **argv)
 		fprintf(stderr, "obs_startup failed\n");
 		return 1;
 	}
+	main_thread = pthread_self();
+	obs_set_ui_task_handler(queue_ui_task);
 	// libobs only mixes audio from sources in a video mix (obs-audio.c builds its render list
 	// from obs->video.mixes), so even an audio test needs a minimal video pipeline.
 	struct obs_video_info ovi = {
@@ -208,11 +251,12 @@ int main(int argc, char **argv)
 	calldata_free(&cd);
 
 	for (int t = 0; t < seconds; t++) {
-		os_sleep_ms(1000);
+		for (int tick = 0; tick < 10; tick++) { os_sleep_ms(100); pump_ui_tasks(); }
 		if (t % 3 == 2) {
 			calldata_t st = {0};
 			proc_handler_call(obs_get_proc_handler(), "faders_status", &st);
 			printf("[%2ds] %s  (track rms: 2=%.4f 3=%.4f 4=%.4f)\n", t + 1, calldata_string(&st, "status"), track_rms[1], track_rms[2], track_rms[3]);
+			printf("fader names: [%s] [%s] [%s]\n", calldata_string(&st, "voice"), calldata_string(&st, "game"), calldata_string(&st, "music"));
 			fflush(stdout);
 			calldata_free(&st);
 		}
