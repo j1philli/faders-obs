@@ -78,7 +78,7 @@ cmake -S . -B build -A x64; cmake --build build --config Release
 Cross-compiling from macOS or Linux (how releases are built): `./scripts/cross-windows.sh` (MinGW-w64)
 → `build-win/faders.dll`; `scripts/ci/check-windows-dll.py` verifies its exports and imports.
 
-Installer: `makensis -DVERSION=0.1.0 -DDLL=<path>/faders.dll -DOUTFILE=<path>/faders-obs-0.1.0-windows.exe installer/windows/faders.nsi`
+Installer: `makensis -DVERSION=0.2.0 -DDLL=<path>/faders.dll -DOUTFILE=<path>/faders-obs-0.2.0-windows.exe installer/windows/faders.nsi`
 (NSIS 3, on Windows or Linux). The installer art in `installer/` is generated from the Faders
 brand kit.
 
@@ -114,18 +114,20 @@ Verified: wrong key → "server rejected connection (HTTP 401)" with backoff; co
 pauses at 0 listeners, resumes and replays backlog on the first listener; Chrome decodes every
 frame and each decoded layer correlates 0.97–0.997 with its own source and ≤0.37 with the others.
 
-## Not verified yet
+## Tested
 
-Released as 0.1.0. These parts haven't been tested by hand yet; bug reports are welcome
-(GitHub issues, or the Faders Discord: discord.gg/TA7Xd8CEAz).
+Released as 0.2.0. Tested end to end by hand in the OBS app (installer, **Tools → Faders**,
+streaming, listening on faders.tv) on:
 
-- **Windows in the OBS app:** the DLL cross-compiles, exports exactly the 8 functions
-  libobs looks up, and every one of its 60 OBS imports exists in the real OBS 32.2.2 DLLs, but it
-  has only run in libobs headlessly (CI), not yet clicked through in the OBS app on Windows.
+- **macOS** on Apple silicon
+- **Windows** x64
+
+### Not tested yet
+
+Bug reports are welcome (GitHub issues, or the Faders Discord: discord.gg/TA7Xd8CEAz).
+
 - **Intel Macs:** the universal build links each architecture against its own OBS release, but
   the x86_64 half hasn't been run yet (no Intel Mac / Rosetta in CI).
-- **GUI check in real OBS:** the Tools menu + properties window haven't been clicked through in
-  the OBS app yet (the headless test bypasses the frontend).
 - **Linux:** not supported yet. It needs a libcurl transport (`src/ws-curl.c`); everything else
   is shared.
 
