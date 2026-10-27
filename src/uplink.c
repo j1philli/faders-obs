@@ -117,6 +117,13 @@ struct fdr_uplink {
 	os_event_t *stop_event;
 };
 
+// "At least `ns` have passed since `since`". The audio and network threads stamp times after the
+// worker took `now`, so a plain unsigned subtraction could wrap and read as "ages ago".
+static inline bool elapsed(uint64_t now, uint64_t since, uint64_t ns)
+{
+	return now >= since && now - since >= ns;
+}
+
 static float peak_of(const struct audio_data *data, int channels)
 {
 	const float *s = (const float *)data->data[0];
@@ -185,8 +192,8 @@ static void on_stream_audio(void *param, size_t mix_idx, struct audio_data *data
 static void check_stream_track(struct fdr_uplink *u, uint64_t now)
 {
 	pthread_mutex_lock(&u->mu);
-	bool silent = u->watching_stream && now - u->watch_start_ns >= STREAM_SILENT_NS &&
-		      now - u->stream_heard_ns >= STREAM_SILENT_NS && now - u->stems_heard_ns < STREAM_SILENT_NS;
+	bool silent = u->watching_stream && elapsed(now, u->watch_start_ns, STREAM_SILENT_NS) &&
+		      elapsed(now, u->stream_heard_ns, STREAM_SILENT_NS) && !elapsed(now, u->stems_heard_ns, STREAM_SILENT_NS);
 	if (silent != u->status.stream_track_silent) {
 		u->status.stream_track_silent = silent;
 		u->stream_status_dirty = true;
@@ -340,8 +347,8 @@ static void maintain_connection(struct fdr_uplink *u, uint64_t now)
 {
 	pthread_mutex_lock(&u->mu);
 	bool open = u->ws && u->connected;
-	bool ping_due = open && now - u->last_ping_ns >= PING_EVERY_NS;
-	if (open && now - u->last_rx_ns >= SILENCE_LIMIT_NS) {
+	bool ping_due = open && elapsed(now, u->last_ping_ns, PING_EVERY_NS);
+	if (open && elapsed(now, u->last_rx_ns, SILENCE_LIMIT_NS)) {
 		u->connected = false;
 		u->listeners = 0;
 		set_error(u, "no response from the server");
