@@ -47,6 +47,14 @@ static char *config_file(void)
 }
 
 static void names_changed(void);
+static void update_available(const char *version);
+
+static void save_settings(obs_data_t *settings)
+{
+	char *path = config_file();
+	obs_data_save_json_safe(settings, path, "tmp", "bak");
+	bfree(path);
+}
 
 // ── Starting / stopping ─────────────────────────────────────────────────────────────────
 
@@ -81,6 +89,7 @@ static void apply(obs_data_t *s)
 			.server = obs_data_get_string(s, "server"),
 			.key = obs_data_get_string(s, "key"),
 			.names_changed = names_changed,
+			.update_available = update_available,
 			.tracks = {(int)obs_data_get_int(s, "track_voice"), (int)obs_data_get_int(s, "track_game"),
 				   (int)obs_data_get_int(s, "track_music")},
 		};
@@ -116,9 +125,7 @@ static void refresh_names(void *unused)
 	obs_data_t *settings = obs_source_get_settings(settings_source);
 	const char *keys[] = {"name_voice", "name_game", "name_music"};
 	for (int i = 0; i < 3; i++) obs_data_set_string(settings, keys[i], st.fader_names[i]);
-	char *path = config_file();
-	obs_data_save_json_safe(settings, path, "tmp", "bak");
-	bfree(path);
+	save_settings(settings);
 	obs_data_release(settings);
 	obs_source_update_properties(settings_source);
 }
@@ -126,6 +133,42 @@ static void refresh_names(void *unused)
 static void names_changed(void)
 {
 	obs_queue_task(OBS_TASK_UI, refresh_names, NULL, false);
+}
+
+// The hub only says a release is newer when the plugin connects, which by default is only while
+// live. Keeping the version in the settings lets the notice outlive the stream: Tools → Faders
+// shows it and OBS's next start opens that window once.
+static void remember_update(void *param)
+{
+	char *version = param;
+	if (settings_source) {
+		obs_data_t *settings = obs_source_get_settings(settings_source);
+		if (strcmp(obs_data_get_string(settings, "update_available"), version) != 0) {
+			obs_data_set_string(settings, "update_available", version);
+			save_settings(settings);
+		}
+		obs_data_release(settings);
+		obs_source_update_properties(settings_source);
+	}
+	bfree(version);
+}
+
+static void update_available(const char *version)
+{
+	obs_queue_task(OBS_TASK_UI, remember_update, bstrdup(version), false);
+}
+
+// The saved release, or NULL once this build is that version or newer (the user has updated).
+static const char *pending_update(obs_data_t *settings)
+{
+	const char *latest = settings ? obs_data_get_string(settings, "update_available") : "";
+	int a[3], b[3];
+	if (sscanf(latest, "%d.%d.%d", &a[0], &a[1], &a[2]) != 3 || sscanf(FDR_VERSION_STR, "%d.%d.%d", &b[0], &b[1], &b[2]) != 3)
+		return NULL;
+	for (int i = 0; i < 3; i++)
+		if (a[i] != b[i])
+			return a[i] > b[i] ? latest : NULL;
+	return NULL;
 }
 
 static void status_text(struct dstr *out)
@@ -213,11 +256,11 @@ static obs_properties_t *src_properties(void *data)
 	}
 
 	// The hub says when a newer release is out; the link always goes to faders.tv.
-	fdr_uplink_status now;
-	get_status(&now);
-	if (now.update_available[0]) {
+	obs_data_t *settings = settings_source ? obs_source_get_settings(settings_source) : NULL;
+	const char *update = pending_update(settings);
+	if (update) {
 		struct dstr label = {0};
-		dstr_printf(&label, "Update available: Faders %s (you have %s). <a href=\"%s\">Download it</a>", now.update_available, FDR_VERSION_STR, DOWNLOAD_URL);
+		dstr_printf(&label, "Update available: Faders %s (you have %s). <a href=\"%s\">Download it</a>", update, FDR_VERSION_STR, DOWNLOAD_URL);
 		obs_property_t *upd = obs_properties_add_text(props, "update", label.array, OBS_TEXT_INFO);
 		obs_property_text_set_info_type(upd, OBS_TEXT_INFO_WARNING);
 		dstr_free(&label);
@@ -230,7 +273,6 @@ static obs_properties_t *src_properties(void *data)
 	obs_properties_add_text(props, "portal", "<a href=\"" PORTAL_URL "\">Open the Faders portal to get key</a>", OBS_TEXT_INFO);
 
 	obs_properties_t *tracks = obs_properties_create();
-	obs_data_t *settings = settings_source ? obs_source_get_settings(settings_source) : NULL;
 	const char *track_keys[] = {"track_voice", "track_game", "track_music"};
 	const char *name_keys[] = {"name_voice", "name_game", "name_music"};
 	const char *defaults[] = {"Voice", "Game", "Music"};
@@ -259,9 +301,7 @@ static obs_properties_t *src_properties(void *data)
 static void src_update(void *data, obs_data_t *settings)
 {
 	UNUSED_PARAMETER(data);
-	char *path = config_file();
-	obs_data_save_json_safe(settings, path, "tmp", "bak");
-	bfree(path);
+	save_settings(settings);
 	apply(settings);
 }
 
@@ -286,12 +326,26 @@ static void open_settings(void *unused)
 	obs_frontend_open_source_properties(settings_source);
 }
 
+// Once per release: open Tools → Faders at startup so the update notice is seen without a stream.
+static void announce_update(void)
+{
+	obs_data_t *settings = obs_source_get_settings(settings_source);
+	const char *update = pending_update(settings);
+	if (update && strcmp(obs_data_get_string(settings, "update_announced"), update) != 0) {
+		obs_data_set_string(settings, "update_announced", update);
+		save_settings(settings);
+		obs_queue_task(OBS_TASK_UI, open_settings, NULL, false);
+	}
+	obs_data_release(settings);
+}
+
 static void on_frontend_event(enum obs_frontend_event event, void *unused)
 {
 	UNUSED_PARAMETER(unused);
 	switch (event) {
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
 		apply_current();
+		announce_update();
 		break;
 	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
 		streaming = true;
