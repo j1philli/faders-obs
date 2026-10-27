@@ -30,7 +30,9 @@ viewers can mix them. Your Twitch stream is not touched.
 - Heartbeat: pings the hub every 20 s and reconnects after 60 s without a reply, so a connection
   silently dropped by a router or proxy recovers on its own.
 - When the hub reports a newer release, **Tools → Faders** shows "Update available" with a link
-  to the download page. The plugin never updates itself.
+  to the download page, until you install that version. The hub only says so while the plugin
+  is connected (by default, while you're live), so the plugin remembers it and opens Tools →
+  Faders once at OBS's next start. The plugin never updates itself.
 - Scriptable: procedures `faders_configure(server, key, voice, game, music, only_live)` and
   `faders_status(out status)` on the global proc handler.
 
@@ -142,3 +144,5 @@ Bundled: Opus (BSD-3-Clause). The Faders hub, website and browser extension are 
 programs that talk to this plugin over the network protocol in `PROTOCOL.md`.
 
 Name synchronization regression test (after building): `node test/fader-names.mjs`. It loads the real plugin in libobs, receives Unicode labels, rejects an excessive name, applies a live rename and checks the saved local labels.
+
+Update notice regression test (after building): `node test/update-notice.mjs`. It checks that the hub's "newer release" notice is saved locally, so Tools → Faders shows it after the stream ends, and that a malformed version is ignored.

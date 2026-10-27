@@ -70,6 +70,7 @@ struct fdr_uplink {
 	char *server;
 	char *key;
 	void (*names_changed)(void);
+	void (*update_available)(const char *version);
 	struct tap taps[STEMS];
 
 	pthread_mutex_t mu; // guards rings, start_ts, ws state, status
@@ -272,11 +273,9 @@ static void on_text(void *param, const char *text)
 	} else if (!strcmp(type, "update")) {
 		const char *latest = obs_data_get_string(message, "latest");
 		size_t n = strspn(latest, "0123456789.");
-		if (n > 0 && n == strlen(latest) && n < sizeof(u->status.update_available)) {
-			pthread_mutex_lock(&u->mu);
-			memcpy(u->status.update_available, latest, n + 1);
-			pthread_mutex_unlock(&u->mu);
+		if (n > 0 && n == strlen(latest) && n < 24) {
 			blog(LOG_INFO, "[faders] update available: %s (this is %s)", latest, FDR_VERSION_STR);
+			if (u->update_available) u->update_available(latest);
 		}
 	} else if (!strcmp(type, "quality")) {
 		long long kbps = obs_data_get_int(message, "kbps");
@@ -481,6 +480,7 @@ fdr_uplink_t *fdr_uplink_start(const fdr_uplink_config *cfg)
 	u->server = bstrdup(cfg->server);
 	u->key = bstrdup(cfg->key);
 	u->names_changed = cfg->names_changed;
+	u->update_available = cfg->update_available;
 	u->last_sent_seq = -1;
 	u->seq0 = (uint32_t)((uint64_t)time(NULL) * 1000 / CHUNK_MS);
 	u->window_start_ns = os_gettime_ns();

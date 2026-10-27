@@ -22,6 +22,7 @@ typedef struct fdr_uplink_config {
 	const char *server; // ws(s)://host/ingest/<channel>
 	const char *key;    // fdr_live_…, sent as a Bearer token
 	void (*names_changed)(void); // queues a UI refresh; called outside the uplink mutex
+	void (*update_available)(const char *version); // the hub's newer release; outside the mutex
 	int tracks[3];      // OBS mixer tracks (1-6) for voice, game, music
 } fdr_uplink_config;
 
@@ -33,7 +34,6 @@ typedef struct fdr_uplink_status {
 	unsigned long long chunks_sent;
 	char last_error[160];
 	char fader_names[3][FDR_NAME_BYTES]; // empty until the hub supplies channel labels
-	char update_available[24]; // newer published version the hub told us about, or ""
 	int stream_track;          // OBS track the stream's audio encoder uses (1-6), 0 when not watched
 	bool stream_track_silent;  // that track has been silent for a while although our tracks aren't
 

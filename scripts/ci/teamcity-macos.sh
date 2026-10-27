@@ -28,6 +28,7 @@ npm ci --no-audit --no-fund
 ./scripts/build-macos.sh # universal plugin (arm64 + x86_64) and the arm64 headless host
 
 node test/fader-names.mjs
+node test/update-notice.mjs
 
 node test/mock-hub.mjs --port "$PORT" > hub.log 2>&1 &
 HUB=$!
