@@ -100,7 +100,7 @@ cmake -S . -B build -A x64; cmake --build build --config Release
 Cross-compiling from macOS or Linux (how releases are built): `./scripts/cross-windows.sh` (MinGW-w64)
 → `build-win/faders.dll`; `scripts/ci/check-windows-dll.py` verifies its exports and imports.
 
-Installer: `makensis -DVERSION=0.2.0 -DDLL=<path>/faders.dll -DOUTFILE=<path>/faders-obs-0.2.0-windows.exe installer/windows/faders.nsi`
+Installer: `makensis -DVERSION=0.4.0 -DDLL=<path>/faders.dll -DOUTFILE=<path>/faders-obs-0.4.0-windows.exe installer/windows/faders.nsi`
 (NSIS 3, on Windows or Linux). The installer art in `installer/` is generated from the Faders
 brand kit.
 
@@ -140,7 +140,7 @@ frame and each decoded layer correlates 0.97–0.997 with its own source and ≤
 
 ## Tested
 
-Released as 0.2.0. Tested end to end by hand in the OBS app (installer, **Tools → Faders**,
+0.2.0 (the tracks version) was tested end to end by hand in the OBS app (installer, **Tools → Faders**,
 streaming, listening on faders.tv) on:
 
 - **macOS** on Apple silicon
@@ -149,6 +149,10 @@ streaming, listening on faders.tv) on:
 ### Not tested yet
 
 Bug reports are welcome (GitHub issues, or the Faders Discord: discord.gg/TA7Xd8CEAz).
+
+- **0.4.0's mixer in the OBS app:** the virtual mixer passes its matrix in headless libobs
+  (`faders-mixtest`) and cross-builds for Windows, but the Sources dialog, studio mode and
+  stingers haven't been clicked through in the OBS app yet.
 
 - **Intel Macs:** the universal build links each architecture against its own OBS release, but
   the x86_64 half hasn't been run yet (no Intel Mac / Rosetta in CI).
@@ -160,7 +164,5 @@ Bug reports are welcome (GitHub issues, or the Faders Discord: discord.gg/TA7Xd8
 GPL-2.0-or-later (see `LICENSE`), the same as OBS Studio, which this plugin links against.
 Bundled: Opus (BSD-3-Clause). The Faders hub, website and browser extension are separate
 programs that talk to this plugin over the network protocol in `PROTOCOL.md`.
-
-Name synchronization regression test (after building): `node test/fader-names.mjs`. It loads the real plugin in libobs, receives Unicode labels, rejects an excessive name, applies a live rename and checks the saved local labels.
 
 Update notice regression test (after building): `node test/update-notice.mjs`. It checks that the hub's "newer release" notice is saved locally, so Tools → Faders shows it after the stream ends, and that a malformed version is ignored.

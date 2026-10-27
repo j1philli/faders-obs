@@ -62,6 +62,15 @@ static char *config_file(void)
 	return obs_module_config_path("settings.json");
 }
 
+static void save_settings(obs_data_t *settings)
+{
+	char *path = config_file();
+	obs_data_save_json_safe(settings, path, "tmp", "bak");
+	bfree(path);
+}
+
+static void update_available(const char *version);
+
 // ── Fader names from the settings' editable list ───────────────────────────────────────
 
 static int fader_names(obs_data_t *s, char names[][FDR_STEM_NAME_MAX], int max)
@@ -149,7 +158,7 @@ static void apply(obs_data_t *s)
 	uplink = NULL;
 	mixer_unavailable = false;
 	if (s && should_run(s)) {
-		fdr_uplink_config cfg = {.server = obs_data_get_string(s, "server"), .key = obs_data_get_string(s, "key")};
+		fdr_uplink_config cfg = {.server = obs_data_get_string(s, "server"), .key = obs_data_get_string(s, "key"), .update_available = update_available};
 		int stream_track = stream_audio_track();
 		uplink = fdr_uplink_start(&cfg);
 		// The mixer needs a stereo, 48 kHz output; without it nothing is sent.
@@ -187,27 +196,6 @@ static void get_status(fdr_uplink_status *st)
 	if (uplink && st->max_stems > 0)
 		max_stems_seen = st->max_stems;
 	pthread_mutex_unlock(&uplink_mu);
-}
-
-// Runs on OBS's UI thread. Updating the labels must not apply/restart the audio uplink.
-static void refresh_names(void *unused)
-{
-	UNUSED_PARAMETER(unused);
-	if (!settings_source) return;
-	fdr_uplink_status st;
-	get_status(&st);
-	if (!st.fader_names[0][0]) return;
-	obs_data_t *settings = obs_source_get_settings(settings_source);
-	const char *keys[] = {"name_voice", "name_game", "name_music"};
-	for (int i = 0; i < 3; i++) obs_data_set_string(settings, keys[i], st.fader_names[i]);
-	save_settings(settings);
-	obs_data_release(settings);
-	obs_source_update_properties(settings_source);
-}
-
-static void names_changed(void)
-{
-	obs_queue_task(OBS_TASK_UI, refresh_names, NULL, false);
 }
 
 // The hub only says a release is newer when the plugin connects, which by default is only while
@@ -394,14 +382,18 @@ static obs_properties_t *src_properties(void *data)
 		obs_property_text_set_info_word_wrap(w, true);
 	}
 
-	// The hub says when a newer release is out; the link always goes to faders.tv.
-	if (now_st.update_available[0]) {
+	// The hub says when a newer release is out (kept in the settings, so it outlives the stream);
+	// the link always goes to faders.tv.
+	obs_data_t *cur = settings_source ? obs_source_get_settings(settings_source) : NULL;
+	const char *update = pending_update(cur);
+	if (update) {
 		struct dstr label = {0};
-		dstr_printf(&label, "Update available: Faders %s (you have %s). <a href=\"%s\">Download it</a>", now_st.update_available, FDR_VERSION_STR, DOWNLOAD_URL);
+		dstr_printf(&label, "Update available: Faders %s (you have %s). <a href=\"%s\">Download it</a>", update, FDR_VERSION_STR, DOWNLOAD_URL);
 		obs_property_t *upd = obs_properties_add_text(props, "update", label.array, OBS_TEXT_INFO);
 		obs_property_text_set_info_type(upd, OBS_TEXT_INFO_WARNING);
 		dstr_free(&label);
 	}
+	obs_data_release(cur);
 
 	obs_properties_add_bool(props, "enabled", "Send Faders layers");
 	obs_properties_add_text(props, "key", "Key", OBS_TEXT_PASSWORD);
@@ -469,9 +461,7 @@ static void src_update(void *data, obs_data_t *settings)
 	UNUSED_PARAMETER(data);
 	for (obs_data_item_t *item = obs_data_first(settings); item; obs_data_item_next(&item))
 		apply_source_choice(item);
-	char *path = config_file();
-	obs_data_save_json_safe(settings, path, "tmp", "bak");
-	bfree(path);
+	save_settings(settings);
 	// A change of names or assignments while running doesn't need a restart.
 	pthread_mutex_lock(&uplink_mu);
 	bool live = uplink && mixer && obs_data_get_bool(settings, "enabled");
@@ -614,11 +604,6 @@ static void proc_status(void *unused, calldata_t *cd)
 	struct dstr text = {0};
 	status_text(&text);
 	calldata_set_string(cd, "status", text.array);
-	fdr_uplink_status st;
-	get_status(&st);
-	calldata_set_string(cd, "voice", st.fader_names[0]);
-	calldata_set_string(cd, "game", st.fader_names[1]);
-	calldata_set_string(cd, "music", st.fader_names[2]);
 	dstr_free(&text);
 }
 

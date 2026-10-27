@@ -2,17 +2,18 @@
 // Minimal stand-in for the Faders hub, for testing the plugin (CI or local). Speaks PROTOCOL.md:
 //   /ingest/<channel>  plugin uplink (Bearer or ?token= must equal --token), receives
 //                      {"type":"listeners","n":N} whenever the listener count changes, and
-//                      {"type":"quality","kbps":N,"maxStems":M} on connect when --kbps is given
+//                      {"type":"quality","kbps":N,"maxStems":M} on connect when --kbps is given,
+//                      {"type":"update","latest":V} on connect when --update is given
 //   /listen/<channel>  viewers: the plugin's {"type":"stems"} (if any), {"type":"backlog"} + up to
 //                      60 s of chunks, {"type":"live"}, then live
 // Every text message from the plugin is logged ("plugin <channel>: ..."), for tests to grep.
 //
-//   node test/mock-hub.mjs [--port 8787] [--token dev-token] [--kbps 256] [--max-stems 4]
+//   node test/mock-hub.mjs [--port 8787] [--token dev-token] [--kbps 256] [--max-stems 4] [--update 0.9.0]
 import { createServer } from "node:http";
 import { parseArgs } from "node:util";
 import { WebSocketServer } from "ws";
 
-const { values: args } = parseArgs({ options: { port: { type: "string", default: "8787" }, token: { type: "string", default: "dev-token" }, kbps: { type: "string" }, "max-stems": { type: "string" } } });
+const { values: args } = parseArgs({ options: { port: { type: "string", default: "8787" }, token: { type: "string", default: "dev-token" }, kbps: { type: "string" }, "max-stems": { type: "string" }, update: { type: "string" } } });
 const RING_MS = 60_000;
 const t0 = Date.now();
 const channels = new Map(); // name -> { ingest, listeners:Set, ring:[], lastSeq }
@@ -23,17 +24,6 @@ const chan = (name) => {
 const notify = (c) => c.ingest?.send(JSON.stringify({ type: "listeners", n: c.listeners.size }));
 
 const server = createServer(async (req, res) => {
-  // Test-only control endpoint: the real hub pushes the same message after a portal save.
-  if (req.url === "/names" && req.method === "POST") {
-    let body = "";
-    for await (const part of req) body += part;
-    const { channel, names } = JSON.parse(body);
-    const c = chan(channel);
-    c.names = names;
-    c.ingest?.send(JSON.stringify({ type: "fader-names", names }));
-    for (const ws of c.listeners) ws.send(JSON.stringify({ type: "fader-names", names }));
-    return res.end("ok");
-  }
   if (req.url === "/health") return res.end("ok");
   res.writeHead(404).end();
 });
@@ -56,6 +46,7 @@ server.on("upgrade", (req, socket, head) => {
       c.ingest?.close(4000, "replaced by new ingest connection");
       c.ingest = ws;
       if (args.kbps) ws.send(JSON.stringify({ type: "quality", kbps: Number(args.kbps), ...(args["max-stems"] ? { maxStems: Number(args["max-stems"]) } : {}) }));
+      if (args.update) ws.send(JSON.stringify({ type: "update", latest: args.update }));
       notify(c);
       ws.on("message", (data, isBinary) => {
         if (!isBinary) {

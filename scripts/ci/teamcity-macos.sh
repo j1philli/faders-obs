@@ -31,6 +31,9 @@ npm ci --no-audit --no-fund
 build/faders-mixcheck > mixcheck.log 2>&1 || { grep -E "^(PASS|FAIL|SKIP)" mixcheck.log; echo "##teamcity[buildProblem description='faders-mixcheck: a libobs mixer assumption failed']"; exit 1; }
 grep -E "^(PASS|FAIL|SKIP)" mixcheck.log
 
+# The hub's update notice is kept in the settings (test/update-notice.mjs runs its own mock hub).
+node test/update-notice.mjs
+
 node test/mock-hub.mjs --port "$PORT" > hub.log 2>&1 &
 HUB=$!
 HOST=""

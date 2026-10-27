@@ -16,8 +16,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define FDR_NAME_BYTES 97 // 24 Unicode code points, up to four UTF-8 bytes each, plus NUL
-
 typedef struct fdr_uplink fdr_uplink_t;
 
 #define FDR_MAX_STEMS 16
@@ -26,6 +24,7 @@ typedef struct fdr_uplink fdr_uplink_t;
 typedef struct fdr_uplink_config {
 	const char *server; // ws(s)://host/ingest/<channel>
 	const char *key;    // fdr_live_…, sent as a Bearer token
+	void (*update_available)(const char *version); // the hub's newer release; called outside the mutex
 } fdr_uplink_config;
 
 typedef struct fdr_uplink_status {
@@ -35,7 +34,6 @@ typedef struct fdr_uplink_status {
 	int uplink_kbps;
 	unsigned long long chunks_sent;
 	char last_error[160];
-	char fader_names[3][FDR_NAME_BYTES]; // empty until the hub supplies channel labels
 	int stream_track;          // OBS track the stream's audio encoder uses (1-6), 0 when not watched
 	bool stream_track_silent;  // that track has been silent for a while although the layers aren't
 	int stems;                 // layers on the wire (the faders plus "Everything else")
