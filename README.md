@@ -17,8 +17,8 @@ viewers can mix them. Your Twitch stream is not touched.
   The hub sends the same labels to viewers and this plugin. **Tools → Faders → Audio tracks**
   refreshes while open and remembers labels when disconnected. Names change display labels only;
   track assignments and the three audio stem IDs stay the same.
-- OBS 32+ shows Faders and its version in **Tools → Plugin Manager** (`data/manifest.json`,
-  written from the project version by CMake).
+- **Tools → Faders** shows the installed version at the bottom. OBS 32+ also shows it in
+  **Tools → Plugin Manager** (`data/manifest.json`, written from the project version by CMake).
 - Taps OBS mixer tracks with `obs_add_raw_audio_callback` (default tracks 2/3/4). Assign
   sources in *Edit → Advanced Audio Properties*.
 - Stereo Opus at 128 kbps per track (at least Twitch's ~160 kbps stereo AAC), 20 ms frames,

@@ -295,6 +295,7 @@ static obs_properties_t *src_properties(void *data)
 	obs_properties_add_group(props, "tracks", "Audio tracks (assign sources in Edit → Advanced Audio Properties)", OBS_GROUP_NORMAL, tracks);
 
 	obs_properties_add_bool(props, "only_live", "Only send while streaming");
+	obs_properties_add_text(props, "version", "Faders plugin " FDR_VERSION_STR, OBS_TEXT_INFO);
 	return props;
 }
 
