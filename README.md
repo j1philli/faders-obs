@@ -64,6 +64,11 @@ OBS and open **Tools → Faders**:
   both where OBS 33 looks (`faders\faders.dll`) and where OBS 32 looks (`faders\bin\64bit\`), so
   one installer works with both and OBS 33 doesn't flag it as a legacy plugin. The plugin DLL,
   installer and uninstaller are code-signed (Azure Trusted Signing).
+- **Zips**, to install by hand (portable OBS, scripted setups): `faders-obs-<version>-windows.zip`
+  holds a `faders` folder to extract into `%ProgramData%\obs-studio\plugins` (or
+  `<OBS folder>\plugins` for portable OBS 33); `faders-obs-<version>-macos.zip` holds
+  `faders.plugin` (signed and notarized) for `~/Library/Application Support/obs-studio/plugins`.
+  Close OBS first; remove the folder to uninstall.
 
 ## Build (macOS)
 
@@ -92,10 +97,10 @@ Installer: `makensis -DVERSION=0.2.0 -DDLL=<path>/faders.dll -DOUTFILE=<path>/fa
 brand kit.
 
 CI runs on TeamCity (`scripts/ci/`): `teamcity-macos.sh` builds natively, runs the end-to-end
-test below against `test/mock-hub.mjs` and packages (zip + `.pkg`; on `main` also Developer ID
+test below against `test/mock-hub.mjs` and packages (`.pkg` + zip; on `main` also Developer ID
 signed and notarized). `teamcity-linux-cross.sh` (in `ubuntu:24.04`) cross-builds the Windows
-release with MinGW, checks the DLL statically and builds the `.exe` installer; on `main` it signs
-the DLL, installer and uninstaller with Azure Trusted Signing (`scripts/sign-windows.sh`).
+release with MinGW, checks the DLL statically and builds the `.exe` installer and zip; on `main`
+it signs the DLL, installer and uninstaller with Azure Trusted Signing (`scripts/sign-windows.sh`).
 The signed `main` builds become a draft GitHub release, which is published by hand.
 
 ## Test without the OBS GUI
