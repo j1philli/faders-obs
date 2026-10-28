@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Packages build/faders.plugin as faders-obs-<version>-macos.pkg (current-user install into
-# ~/Library/Application Support/obs-studio/plugins). Run scripts/build-macos.sh first.
+# ~/Library/Application Support/obs-studio/plugins), and the same bundle as
+# faders-obs-<version>-macos.zip for extracting by hand. Run scripts/build-macos.sh first.
 #
 # Unsigned by default: macOS then asks the user to allow it in System Settings → Privacy &
 # Security. Release signing, when these are set (needs a paid Apple Developer account):
 #   MACOS_APP_IDENTITY        "Developer ID Application: …"  signs the plugin (hardened runtime)
 #   MACOS_INSTALLER_IDENTITY  "Developer ID Installer: …"    signs the .pkg
-#   MACOS_NOTARY_PROFILE      notarytool keychain profile    notarizes and staples the .pkg
+#   MACOS_NOTARY_PROFILE      notarytool keychain profile    notarizes and staples the .pkg (the
+#                                                            ticket also covers the zip's bundle)
 # or, instead of a profile, an App Store Connect API key (the same kind of key used for iOS uploads):
 #   MACOS_NOTARY_KEY_PATH, MACOS_NOTARY_KEY_ID, MACOS_NOTARY_ISSUER
 # On CI the identities can live in their own keychain, unlocked for the build:
@@ -16,6 +18,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 VERSION="${FADERS_VERSION:-$(sed -n 's/^project(faders VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)}"
 OUT="faders-obs-$VERSION-macos.pkg"
+ZIP="faders-obs-$VERSION-macos.zip"
 WORK=package/macos
 keychain=()
 rm -rf "$WORK" && mkdir -p "$WORK/root" "$WORK/resources"
@@ -55,4 +58,7 @@ if [ ${#notary[@]} -gt 0 ]; then
   xcrun notarytool submit "$OUT" "${notary[@]}" --wait
   xcrun stapler staple "$OUT"
 fi
-echo "built $OUT ($([ ${#sign[@]} -gt 0 ] && echo signed || echo unsigned))"
+# The signed bundle that went into the .pkg; notarizing the .pkg notarized it too.
+rm -f "$ZIP"
+ditto -c -k --norsrc --noextattr --noqtn --keepParent "$WORK/root/faders.plugin" "$ZIP"
+echo "built $OUT and $ZIP ($([ ${#sign[@]} -gt 0 ] && echo signed || echo unsigned))"
