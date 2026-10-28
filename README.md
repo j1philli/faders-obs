@@ -57,7 +57,10 @@ OBS and open **Tools → Faders**:
   user into `~/Library/Application Support/obs-studio/plugins`. Signed with a Developer ID and
   notarized by Apple.
 - **Windows 10/11 x64**: `faders-obs-<version>-windows.exe`. Installs into
-  `%ProgramData%\obs-studio\plugins\faders`; uninstall from Settings → Apps. The DLL is placed
+  `%ProgramData%\obs-studio\plugins\faders` by default; for portable OBS 33, pick
+  `<OBS folder>\plugins` on the folder page instead (an upgrade reuses the last folder, and moving
+  removes the old copy). Setup and uninstall wait for OBS to close. Uninstall from Settings →
+  Apps. The DLL is placed
   both where OBS 33 looks (`faders\faders.dll`) and where OBS 32 looks (`faders\bin\64bit\`), so
   one installer works with both and OBS 33 doesn't flag it as a legacy plugin. The plugin DLL,
   installer and uninstaller are code-signed (Azure Trusted Signing).
