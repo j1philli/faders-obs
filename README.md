@@ -13,8 +13,12 @@ transitions). Your Twitch stream is not touched.
 
 - **Tools → Faders** opens the settings (OBS's own properties window, no custom UI code):
   key (with a link to the portal to get one), the **Faders** list (names, in order; "Your plan
-  includes N faders"), **Sources** (one dropdown per audio source: a fader, "Everything else", or
-  "Auto (→ X)" from the rule table in `PROTOCOL.md`) and "Only send while streaming". The
+  includes N faders"), **Sources and tracks** (one dropdown per audio source: a fader, "Everything else", or
+  "Auto (→ X)" from the rule table in `PROTOCOL.md`; then one per OBS track except the streamed
+  one: "Not used", a fader, or "Everything else") and "Only send while streaming". A track
+  given a fader is an assignment rule, not a second audio path: every source ticked for it and
+  left on Auto resolves to that fader (lowest assigned track first), so each source is still in
+  exactly one fader and the mix stays exact. `faders_assign_track(track, fader)` scripts it. The
   server is `wss://hub.faders.tv/ingest` (the key identifies the channel); tests point it
   elsewhere with the `faders_configure` procedure.
 - **The virtual mixer** (`src/mixer.c`): no OBS tracks are used. The plugin mixes each fader

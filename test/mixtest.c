@@ -139,6 +139,15 @@ static void assign(const char *source, const char *fader)
 }
 
 // Stats: fetch the JSON once (resets the plugin's window) and pick values out of it.
+static void assign_track(int track, const char *fader)
+{
+	calldata_t cd = {0};
+	calldata_set_int(&cd, "track", track);
+	calldata_set_string(&cd, "fader", fader);
+	call("faders_assign_track", &cd);
+	calldata_free(&cd);
+}
+
 static char stats[8192];
 static void fetch_stats(void)
 {
@@ -407,6 +416,40 @@ int main(int argc, char **argv)
 	       mismatch());
 	obs_source_set_audio_mixers(game, 1);
 	os_sleep_ms(500);
+
+	// ── 6b: an OBS track as a fader input ───────────────────────────────────────────────
+	// "extra" has no assignment of its own. Ticked for Track 3, with Track 3 → Music, it joins
+	// Music and leaves Everything else; "game" is on Track 3 too but keeps its own choice.
+	obs_source_set_audio_mixers(extra, 1 | 4);
+	obs_source_set_audio_mixers(game, 1 | 4);
+	assign_track(3, "Music");
+	window(800, 600);
+	double music_with_extra = sqrt(R_MUSIC * R_MUSIC + R_EXTRA * R_EXTRA);
+	result(close_to(fader_rms("Music"), music_with_extra, 0.03) && close_to(fader_rms("Game"), R_GAME, 0.03) && rest_dbfs() < -60.0 && mismatch()[0] == 0, "6b track → fader carries its unassigned sources",
+	       "Music %.4f (want %.4f: music + extra), Game %.4f (want %.4f: its own choice wins), rest %.1f dBFS, mismatch \"%s\"", fader_rms("Music"), music_with_extra, fader_rms("Game"), R_GAME, rest_dbfs(), mismatch());
+	// Unticking the track in OBS is followed without any call to the plugin.
+	obs_source_set_audio_mixers(extra, 1);
+	window(800, 600);
+	result(close_to(fader_rms("Music"), R_MUSIC, 0.03) && close_to(rest_rms(), R_EXTRA, 0.03), "6c unticking the track moves the source back", "Music %.4f (want %.4f), rest %.4f (want %.4f)", fader_rms("Music"), R_MUSIC,
+	       rest_rms(), R_EXTRA);
+	// Ticked for two assigned tracks, the lower-numbered one decides: still exactly one fader.
+	obs_source_set_audio_mixers(extra, 1 | 2 | 4);
+	assign_track(2, "Voice");
+	window(800, 600);
+	double voice_with_extra = sqrt(R_VOICE * R_VOICE + R_EXTRA * R_EXTRA);
+	result(close_to(fader_rms("Voice"), voice_with_extra, 0.03) && close_to(fader_rms("Music"), R_MUSIC, 0.03) && rest_dbfs() < -60.0, "6d two assigned tracks: the lower one decides",
+	       "Voice %.4f (want %.4f: voice + extra), Music %.4f (want %.4f), rest %.1f dBFS", fader_rms("Voice"), voice_with_extra, fader_rms("Music"), R_MUSIC, rest_dbfs());
+	// A track sent to Everything else, then not used at all: the source is in the residual again.
+	assign_track(2, "");
+	window(800, 600);
+	double rest_via_track = rest_rms();
+	assign_track(2, "none");
+	assign_track(3, "none");
+	obs_source_set_audio_mixers(extra, 1);
+	obs_source_set_audio_mixers(game, 1);
+	window(800, 600);
+	result(close_to(rest_via_track, R_EXTRA, 0.03) && close_to(rest_rms(), R_EXTRA, 0.03) && close_to(fader_rms("Voice"), R_VOICE, 0.03) && close_to(fader_rms("Music"), R_MUSIC, 0.03),
+	       "6e track → Everything else, and tracks unused again", "rest via track %.4f, after %.4f (want %.4f); Voice %.4f Music %.4f", rest_via_track, rest_rms(), R_EXTRA, fader_rms("Voice"), fader_rms("Music"));
 
 	// From here the residual should be ~0: put the extra tone in a fader.
 	assign("extra", "Discord");

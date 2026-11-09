@@ -45,6 +45,9 @@ MODULE_EXPORT const char *obs_module_description(void)
 #define SRC_PREFIX "src:" // per-source dropdowns in the dialog: "src:<uuid>" → fader name / "~rest" / "~auto"
 #define CHOICE_REST "~rest"
 #define CHOICE_AUTO "~auto"
+// OBS tracks as fader inputs: "track:<1-6>" → fader name / "~rest" / "~none" (the default).
+#define TRACK_PREFIX "track:"
+#define CHOICE_NONE "~none"
 
 static obs_source_t *settings_source; // private, never shown in a scene
 static fdr_uplink_t *uplink;
@@ -147,6 +150,32 @@ static void apply_faders(obs_data_t *s)
 	for (int i = 0; i < n; i++)
 		ptrs[i] = names[i];
 	fdr_mixer_set_faders(mixer, ptrs, n, max_stems_seen);
+	const char *tracks[6];
+	for (int t = 0; t < 6; t++) {
+		char key[16];
+		snprintf(key, sizeof(key), TRACK_PREFIX "%d", t + 1);
+		const char *v = obs_data_get_string(s, key);
+		tracks[t] = !*v || strcmp(v, CHOICE_NONE) == 0 ? NULL : strcmp(v, CHOICE_REST) == 0 ? "" : v;
+	}
+	fdr_mixer_set_track_faders(mixer, tracks);
+}
+
+// The assigned track (1-6) that decides `s`'s fader from the settings alone (the dialog shows
+// this whether or not the mixer is running), or 0; *fader is its choice.
+static int settings_track_for(obs_data_t *settings, obs_source_t *s, const char **fader)
+{
+	uint32_t mixers = obs_source_get_audio_mixers(s);
+	int stream = stream_audio_track();
+	for (int t = 1; t <= 6; t++) {
+		char key[16];
+		snprintf(key, sizeof(key), TRACK_PREFIX "%d", t);
+		const char *v = obs_data_get_string(settings, key);
+		if (!*v || strcmp(v, CHOICE_NONE) == 0 || t == (stream ? stream : 1) || !(mixers & (1u << (t - 1))))
+			continue;
+		*fader = v;
+		return t;
+	}
+	return 0;
 }
 
 static void apply(obs_data_t *s)
@@ -278,6 +307,11 @@ static void src_defaults(obs_data_t *s)
 	obs_data_set_default_bool(s, "enabled", true);
 	obs_data_set_default_string(s, "server", DEFAULT_SERVER);
 	obs_data_set_default_bool(s, "only_live", true);
+	for (int t = 1; t <= 6; t++) {
+		char key[16];
+		snprintf(key, sizeof(key), TRACK_PREFIX "%d", t);
+		obs_data_set_default_string(s, key, CHOICE_NONE);
+	}
 	static const char *const defaults[] = {"Voice", "Game", "Music"};
 	obs_data_array_t *arr = names_array(defaults, 3);
 	obs_data_set_default_array(s, S_FADERS, arr);
@@ -311,8 +345,19 @@ static bool add_source_row(void *param, obs_source_t *s)
 		for (int i = 0; i < r->n && !resolved; i++)
 			if (astrcmpi(r->names[i], "Voice") == 0)
 				resolved = r->names[i];
-	char auto_label[64];
-	snprintf(auto_label, sizeof(auto_label), "Auto (→ %s)", resolved ? resolved : "Everything else");
+	char auto_label[96];
+	// An assigned track the source is ticked for decides before the rules do.
+	const char *track_choice = NULL;
+	int track = settings_track_for(r->settings, s, &track_choice);
+	if (track) {
+		resolved = NULL;
+		for (int i = 0; i < r->n && !resolved; i++)
+			if (astrcmpi(r->names[i], track_choice) == 0)
+				resolved = r->names[i];
+		snprintf(auto_label, sizeof(auto_label), "Auto (→ %s, from Track %d)", resolved ? resolved : "Everything else", track);
+	} else {
+		snprintf(auto_label, sizeof(auto_label), "Auto (→ %s)", resolved ? resolved : "Everything else");
+	}
 	obs_property_list_add_string(p, auto_label, CHOICE_AUTO);
 	for (int i = 0; i < r->n; i++)
 		obs_property_list_add_string(p, r->names[i], r->names[i]);
@@ -424,7 +469,32 @@ static obs_properties_t *src_properties(void *data)
 	obs_enum_sources(add_source_row, &rows);
 	if (!rows.rows)
 		obs_properties_add_text(sources, "no_sources", "No audio sources in this scene collection yet.", OBS_TEXT_INFO);
-	obs_properties_add_group(props, "sources_group", "Sources (which fader each one belongs to)", OBS_GROUP_NORMAL, sources);
+	// OBS tracks, alongside the sources: a track given a fader sends every source ticked for it
+	// (Edit → Advanced Audio Properties) there, unless the source has its own choice above.
+	int stream_track = stream_audio_track() ? stream_audio_track() : 1;
+	for (int t = 1; t <= 6; t++) {
+		if (t == stream_track) // everything in the stream is on it: nothing to pick
+			continue;
+		char key[16], label[32];
+		snprintf(key, sizeof(key), TRACK_PREFIX "%d", t);
+		snprintf(label, sizeof(label), "OBS Track %d", t);
+		obs_property_t *p = obs_properties_add_list(sources, key, label, OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+		obs_property_list_add_string(p, "Not used", CHOICE_NONE);
+		for (int i = 0; i < rows.n; i++)
+			obs_property_list_add_string(p, rows.names[i], rows.names[i]);
+		obs_property_list_add_string(p, "Everything else", CHOICE_REST);
+		const char *cur = obs_data_get_string(settings, key);
+		bool known = !*cur || strcmp(cur, CHOICE_NONE) == 0 || strcmp(cur, CHOICE_REST) == 0;
+		for (int i = 0; i < rows.n; i++)
+			known = known || astrcmpi(rows.names[i], cur) == 0;
+		if (!known) { // a fader that no longer exists: shown as is, mixes as Everything else
+			char gone[96];
+			snprintf(gone, sizeof(gone), "%s (no such fader: Everything else)", cur);
+			obs_property_list_add_string(p, gone, cur);
+		}
+		obs_property_set_long_description(p, "Send every source ticked for this track (Edit → Advanced Audio Properties) to one fader. A source with its own choice above keeps it.");
+	}
+	obs_properties_add_group(props, "sources_group", "Sources and tracks (which fader each one belongs to)", OBS_GROUP_NORMAL, sources);
 	obs_properties_add_text(props, "version", "Faders plugin " FDR_VERSION_STR, OBS_TEXT_INFO);
 
 	obs_data_release(settings);
@@ -552,6 +622,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *unused)
 // ── Scripting / automation procedures (also used by the headless tests) ─────────────────
 // faders_configure(server, key, faders, only_live): faders = comma list ("Voice,Game,Music").
 // faders_assign(source, fader): fader name, "" = Everything else, "auto".
+// faders_assign_track(track, fader): fader name, "" = Everything else, "none" = not used.
 // faders_watch_stream_track(track) · faders_status(out status) · faders_mixer_stats(out json)
 
 static void proc_watch_stream_track(void *data, calldata_t *cd)
@@ -596,6 +667,21 @@ static void proc_assign(void *unused, calldata_t *cd)
 		fdr_mixer_assign(mixer, src, fader && strcmp(fader, "auto") == 0 ? NULL : fader);
 	pthread_mutex_unlock(&uplink_mu);
 	obs_source_release(src);
+}
+
+static void proc_assign_track(void *unused, calldata_t *cd)
+{
+	UNUSED_PARAMETER(unused);
+	int track = (int)calldata_int(cd, "track");
+	const char *fader = calldata_string(cd, "fader");
+	if (track < 1 || track > 6 || !fader)
+		return;
+	char key[16];
+	snprintf(key, sizeof(key), TRACK_PREFIX "%d", track);
+	obs_data_t *s = obs_data_create();
+	obs_data_set_string(s, key, strcmp(fader, "none") == 0 ? CHOICE_NONE : *fader ? fader : CHOICE_REST);
+	obs_source_update(settings_source, s);
+	obs_data_release(s);
 }
 
 static void proc_status(void *unused, calldata_t *cd)
@@ -655,6 +741,7 @@ bool obs_module_load(void)
 	proc_handler_add(ph, "void faders_watch_stream_track(in int track)", proc_watch_stream_track, NULL);
 	proc_handler_add(ph, "void faders_configure(in string server, in string key, in string faders, in bool only_live)", proc_configure, NULL);
 	proc_handler_add(ph, "void faders_assign(in string source, in string fader)", proc_assign, NULL);
+	proc_handler_add(ph, "void faders_assign_track(in int track, in string fader)", proc_assign_track, NULL);
 	proc_handler_add(ph, "void faders_status(out string status)", proc_status, NULL);
 	proc_handler_add(ph, "void faders_mixer_stats(out string json)", proc_mixer_stats, NULL);
 	proc_handler_add(ph, "void faders_rebuild()", proc_rebuild, NULL);

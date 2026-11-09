@@ -40,6 +40,7 @@ struct entry {
 	obs_weak_source_t *weak;
 	char name[64];
 	int fader; // 0..n_faders-1 (folded ones already mapped to REST) or REST
+	uint32_t mixers; // the source's track ticks when this snapshot was built
 	bool force;
 	// Oracle sums for the current window (audio thread).
 	double xy, xx;
@@ -93,6 +94,10 @@ struct fdr_mixer {
 	int n_faders;
 	int max_stems; // plan allowance; faders past it fold into REST
 	int n_wire;    // faders actually sent (≤ n_faders)
+	// OBS tracks used as fader inputs (index = track - 1): see fdr_mixer_set_track_faders.
+	bool track_set[6];
+	char track_fader[6][FDR_STEM_NAME_MAX]; // "" = Everything else
+	bool any_track;
 	struct snapshot *snap;
 	struct fade fade;
 	obs_weak_source_t *dropped[MAX_ENTRIES];
@@ -533,15 +538,32 @@ static int fader_index(struct fdr_mixer *m, const char *name)
 	return -1;
 }
 
-// Locked. The fader index for a source: its private setting, else the rule table (with the
-// table's fallbacks when that fader doesn't exist), folded faders → REST.
+// Locked. The lowest-numbered assigned track (0-5) the source is ticked for, or -1. The streamed
+// track is never one: everything in the stream is on it.
+static int deciding_track(struct fdr_mixer *m, obs_source_t *src)
+{
+	if (!m->any_track)
+		return -1;
+	uint32_t mixers = obs_source_get_audio_mixers(src);
+	for (int t = 0; t < 6; t++)
+		if (m->track_set[t] && (mixers & (1u << t)) && (1u << t) != m->stream_bit)
+			return t;
+	return -1;
+}
+
+// Locked. The fader index for a source: its private setting, else the fader of an assigned track
+// it is ticked for, else the rule table (with the table's fallbacks when that fader doesn't
+// exist); folded faders → REST.
 static int resolve_fader(struct fdr_mixer *m, obs_source_t *src, bool *is_auto)
 {
 	obs_data_t *priv = obs_source_get_private_settings(src);
 	int idx = -1;
 	bool automatic = !obs_data_has_user_value(priv, FDR_FADER_SETTING);
+	int track = automatic ? deciding_track(m, src) : -1;
 	if (!automatic) {
 		idx = fader_index(m, obs_data_get_string(priv, FDR_FADER_SETTING));
+	} else if (track >= 0) {
+		idx = fader_index(m, m->track_fader[track]); // "" or an unknown name: Everything else
 	} else {
 		const char *pick = fdr_mixer_auto_fader(src);
 		idx = fader_index(m, pick);
@@ -577,6 +599,7 @@ static bool collect_cb(void *param, obs_source_t *s)
 	e->weak = obs_source_get_weak_source(s);
 	snprintf(e->name, sizeof(e->name), "%s", obs_source_get_name(s));
 	e->fader = resolve_fader(c->m, s, NULL);
+	e->mixers = obs_source_get_audio_mixers(s);
 	obs_data_t *priv = obs_source_get_private_settings(s);
 	e->force = obs_data_get_bool(priv, FDR_FORCE_SETTING);
 	obs_data_release(priv);
@@ -744,6 +767,18 @@ static void *rebuild_thread(void *param)
 			pthread_mutex_unlock(&m->mu);
 			m->dirty = true;
 		}
+		// With tracks assigned to faders, a source's track ticks decide its fader, and libobs has
+		// no global signal for them: compare against the snapshot.
+		if (m->any_track && !m->dirty) {
+			pthread_mutex_lock(&m->mu);
+			for (int i = 0; m->snap && i < m->snap->n && !m->dirty; i++) {
+				obs_source_t *s = obs_weak_source_get_source(m->snap->e[i].weak);
+				if (s && obs_source_get_audio_mixers(s) != m->snap->e[i].mixers)
+					m->dirty = true;
+				obs_source_release(s);
+			}
+			pthread_mutex_unlock(&m->mu);
+		}
 		if (m->dirty) {
 			m->dirty = false;
 			fdr_mixer_rebuild(m);
@@ -887,6 +922,45 @@ void fdr_mixer_set_faders(fdr_mixer_t *m, const char *const *names, int n, int m
 	announce(m);
 	pthread_mutex_unlock(&m->mu);
 	fdr_mixer_rebuild(m);
+}
+
+void fdr_mixer_set_track_faders(fdr_mixer_t *m, const char *const faders[6])
+{
+	if (!m)
+		return;
+	pthread_mutex_lock(&m->mu);
+	bool changed = false;
+	m->any_track = false;
+	for (int t = 0; t < 6; t++) {
+		bool set = faders[t] != NULL;
+		const char *name = set ? faders[t] : "";
+		if (set != m->track_set[t] || strcmp(name, m->track_fader[t]) != 0) {
+			changed = true;
+			if (set)
+				blog(LOG_INFO, "[faders] Track %d → %s", t + 1, *name ? name : "Everything else");
+			else
+				blog(LOG_INFO, "[faders] Track %d is no longer a fader input", t + 1);
+		}
+		m->track_set[t] = set;
+		snprintf(m->track_fader[t], sizeof(m->track_fader[t]), "%s", name);
+		m->any_track = m->any_track || set;
+	}
+	pthread_mutex_unlock(&m->mu);
+	if (changed)
+		fdr_mixer_rebuild(m);
+}
+
+int fdr_mixer_track_for(fdr_mixer_t *m, obs_source_t *src)
+{
+	if (!m || !src)
+		return 0;
+	obs_data_t *priv = obs_source_get_private_settings(src);
+	bool automatic = !obs_data_has_user_value(priv, FDR_FADER_SETTING);
+	obs_data_release(priv);
+	pthread_mutex_lock(&m->mu);
+	int t = automatic ? deciding_track(m, src) : -1;
+	pthread_mutex_unlock(&m->mu);
+	return t + 1;
 }
 
 int fdr_mixer_fader_count(fdr_mixer_t *m)
