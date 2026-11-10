@@ -551,6 +551,37 @@ int main(int argc, char **argv)
 	if (!warned)
 		printf("      warning row was: %s\n", warning);
 
+	// ── 6i: renaming a fader keeps what is on it; names are cut to the wire's 24 characters ──
+	// Sources and tracks are stored by fader name. Voice becomes Commentary in place: the voice
+	// tone and Track 4 (carrying "extra", which is on no fader of its own) follow it. A 30-character name is cut to 24 and still
+	// carries them. Then back to Voice for the cases below.
+	obs_source_set_audio_mixers(extra, 1 | 8);
+	assign_track(4, "Voice");
+	const char *lists[] = {"Commentary,Game,Music,Discord", "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123,Game,Music,Discord", "Voice,Game,Music,Discord"};
+	const char *expect[] = {"Commentary", "ABCDEFGHIJKLMNOPQRSTUVWX", "Voice"};
+	double renamed_rms[3], renamed_rest[3];
+	for (int i = 0; i < 3; i++) {
+		calldata_t cd = {0};
+		calldata_set_string(&cd, "server", argv[1]);
+		calldata_set_string(&cd, "key", argv[2]);
+		calldata_set_string(&cd, "faders", lists[i]);
+		calldata_set_bool(&cd, "only_live", false);
+		call("faders_configure", &cd);
+		calldata_free(&cd);
+		window(800, 600);
+		renamed_rms[i] = fader_rms(expect[i]);
+		renamed_rest[i] = rest_dbfs();
+	}
+	assign_track(4, "none");
+	obs_source_set_audio_mixers(extra, 1);
+	double voice_and_extra = sqrt(R_VOICE * R_VOICE + R_EXTRA * R_EXTRA);
+	bool followed = true;
+	for (int i = 0; i < 3; i++)
+		followed = followed && close_to(renamed_rms[i], voice_and_extra, 0.03) && renamed_rest[i] < -60.0;
+	result(followed, "6i renamed fader keeps its sources and tracks", "Commentary %.4f, 24-char name %.4f, Voice again %.4f (want %.4f each); rest %.1f %.1f %.1f dBFS", renamed_rms[0], renamed_rms[1], renamed_rms[2], voice_and_extra,
+	       renamed_rest[0], renamed_rest[1], renamed_rest[2]);
+	window(600, 300);
+
 	// From here the residual should be ~0: put the extra tone in a fader.
 	assign("extra", "Discord");
 	os_sleep_ms(800);

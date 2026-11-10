@@ -74,6 +74,43 @@ static void update_available(const char *version);
 
 // ── Fader names from the settings' editable list ───────────────────────────────────────
 
+// A fader name as it goes on the wire (PROTOCOL.md): no control characters, no outer spaces, at
+// most 24 characters the way the hub counts them (UTF-16 units, so an emoji is two), cut between
+// characters, never inside one.
+#define NAME_UNITS 24
+static void clean_name(const char *v, char out[FDR_STEM_NAME_MAX])
+{
+	while (*v == ' ' || (*v && (unsigned char)*v < 0x20))
+		v++;
+	size_t len = 0;
+	int units = 0;
+	while (*v) {
+		unsigned char c = (unsigned char)*v;
+		size_t bytes = c < 0x80 ? 1 : (c & 0xe0) == 0xc0 ? 2 : (c & 0xf0) == 0xe0 ? 3 : (c & 0xf8) == 0xf0 ? 4 : 0;
+		bool whole = bytes > 0;
+		for (size_t i = 1; i < bytes && whole; i++)
+			whole = ((unsigned char)v[i] & 0xc0) == 0x80;
+		if (!whole) { // not UTF-8: skip the byte
+			v++;
+			continue;
+		}
+		if (c < 0x20) { // control characters are dropped
+			v++;
+			continue;
+		}
+		int u = bytes == 4 ? 2 : 1;
+		if (units + u > NAME_UNITS || len + bytes >= FDR_STEM_NAME_MAX)
+			break;
+		memcpy(out + len, v, bytes);
+		len += bytes;
+		units += u;
+		v += bytes;
+	}
+	while (len > 0 && out[len - 1] == ' ')
+		len--;
+	out[len] = 0;
+}
+
 static int fader_names(obs_data_t *s, char names[][FDR_STEM_NAME_MAX], int max)
 {
 	obs_data_array_t *arr = obs_data_get_array(s, S_FADERS);
@@ -83,12 +120,8 @@ static int fader_names(obs_data_t *s, char names[][FDR_STEM_NAME_MAX], int max)
 		obs_data_t *item = obs_data_array_item(arr, i);
 		const char *v = obs_data_get_string(item, "value");
 		// Trim, cap the length, skip blanks and duplicates (names identify faders).
-		while (*v == ' ')
-			v++;
 		char tmp[FDR_STEM_NAME_MAX];
-		snprintf(tmp, sizeof(tmp), "%s", v);
-		for (size_t k = strlen(tmp); k > 0 && tmp[k - 1] == ' '; k--)
-			tmp[k - 1] = 0;
+		clean_name(v, tmp);
 		bool dup = false;
 		for (int j = 0; j < n; j++)
 			dup = dup || astrcmpi(names[j], tmp) == 0;
@@ -99,6 +132,10 @@ static int fader_names(obs_data_t *s, char names[][FDR_STEM_NAME_MAX], int max)
 	obs_data_array_release(arr);
 	return n;
 }
+
+// The fader list as of the last update (main thread), to tell a rename from other edits.
+static char last_names[FDR_MAX_FADERS][FDR_STEM_NAME_MAX];
+static int n_last_names = -1;
 
 static obs_data_array_t *names_array(const char *const *names, int n)
 {
@@ -176,6 +213,17 @@ static int settings_track_for(obs_data_t *settings, obs_source_t *s, const char 
 	return 0;
 }
 
+// What the running uplink was started with (locked by uplink_mu).
+static struct dstr run_server, run_key;
+
+// Locked. The running uplink and mixer are what these settings ask for: only the fader list and
+// the assignments can differ, and those are applied without a restart.
+static bool running_as(obs_data_t *s)
+{
+	return uplink && mixer && should_run(s) && run_server.array && run_key.array && strcmp(run_server.array, obs_data_get_string(s, "server")) == 0 &&
+	       strcmp(run_key.array, obs_data_get_string(s, "key")) == 0;
+}
+
 static void apply(obs_data_t *s)
 {
 	pthread_mutex_lock(&uplink_mu);
@@ -186,6 +234,8 @@ static void apply(obs_data_t *s)
 	mixer_unavailable = false;
 	if (s && should_run(s)) {
 		fdr_uplink_config cfg = {.server = obs_data_get_string(s, "server"), .key = obs_data_get_string(s, "key"), .update_available = update_available};
+		dstr_copy(&run_server, cfg.server);
+		dstr_copy(&run_key, cfg.key);
 		int stream_track = stream_audio_track();
 		uplink = fdr_uplink_start(&cfg);
 		// The mixer needs a stereo, 48 kHz output; without it nothing is sent.
@@ -291,7 +341,7 @@ static const char *src_get_name(void *unused)
 
 static void *src_create(obs_data_t *settings, obs_source_t *source)
 {
-	UNUSED_PARAMETER(settings);
+	n_last_names = fader_names(settings, last_names, FDR_MAX_FADERS);
 	return source;
 }
 
@@ -668,6 +718,67 @@ static bool apply_dialog_changes(obs_data_t *settings)
 	return changed;
 }
 
+struct rename {
+	const char *from, *to;
+	const char (*before)[FDR_STEM_NAME_MAX];
+	int n_before;
+};
+
+static bool rename_source(void *param, obs_source_t *s)
+{
+	const struct rename *r = param;
+	uint32_t flags = obs_source_get_output_flags(s);
+	if (!(flags & OBS_SOURCE_AUDIO) || (flags & OBS_SOURCE_COMPOSITE) || obs_source_get_type(s) != OBS_SOURCE_TYPE_INPUT)
+		return true;
+	obs_data_t *priv = obs_source_get_private_settings(s);
+	const char *on = NULL;
+	if (obs_data_has_user_value(priv, FDR_FADER_SETTING)) {
+		on = obs_data_get_string(priv, FDR_FADER_SETTING);
+	} else {
+		// Never placed: it sits where the plugin's starting guess put it under the old names.
+		on = fdr_mixer_auto_fader(s);
+		bool exists = false, voice = false;
+		for (int i = 0; on && i < r->n_before; i++) {
+			exists = exists || astrcmpi(r->before[i], on) == 0;
+			voice = voice || astrcmpi(r->before[i], "Voice") == 0;
+		}
+		if (on && !exists && strcmp(on, "Discord") == 0 && voice)
+			on = "Voice";
+	}
+	if (on && astrcmpi(on, r->from) == 0)
+		obs_data_set_string(priv, FDR_FADER_SETTING, r->to);
+	obs_data_release(priv);
+	return true;
+}
+
+// A fader renamed in place (same position, same number of faders, the old name gone and the new
+// one new) keeps what was on it: sources and tracks are stored by fader name, so they follow.
+static void follow_renames(obs_data_t *settings, const char names[][FDR_STEM_NAME_MAX], int n)
+{
+	if (n_last_names == n) {
+		for (int i = 0; i < n; i++) {
+			if (astrcmpi(last_names[i], names[i]) == 0)
+				continue;
+			bool reused = false;
+			for (int j = 0; j < n; j++)
+				reused = reused || astrcmpi(names[j], last_names[i]) == 0 || astrcmpi(last_names[j], names[i]) == 0;
+			if (reused)
+				continue; // a swap or a reorder, not a rename
+			struct rename r = {last_names[i], names[i], last_names, n};
+			obs_enum_sources(rename_source, &r);
+			for (int t = 1; t <= 6; t++) {
+				char key[16];
+				snprintf(key, sizeof(key), TRACK_PREFIX "%d", t);
+				if (astrcmpi(obs_data_get_string(settings, key), r.from) == 0)
+					obs_data_set_string(settings, key, r.to);
+			}
+			blog(LOG_INFO, "[faders] fader \"%s\" renamed to \"%s\": its sources and tracks follow", r.from, r.to);
+		}
+	}
+	memcpy(last_names, names, sizeof(last_names));
+	n_last_names = n;
+}
+
 static void src_update(void *data, obs_data_t *settings)
 {
 	UNUSED_PARAMETER(data);
@@ -675,6 +786,7 @@ static void src_update(void *data, obs_data_t *settings)
 	// Renaming, adding or removing a fader changes the rows too.
 	char names[FDR_MAX_FADERS][FDR_STEM_NAME_MAX];
 	int n = fader_names(settings, names, FDR_MAX_FADERS);
+	follow_renames(settings, names, n);
 	char joined[sizeof(dialog_names)] = "";
 	for (int i = 0; i < n; i++) {
 		strncat(joined, names[i], sizeof(joined) - strlen(joined) - 2);
@@ -684,7 +796,8 @@ static void src_update(void *data, obs_data_t *settings)
 	save_settings(settings);
 	// A change of names or assignments while running doesn't need a restart.
 	pthread_mutex_lock(&uplink_mu);
-	bool live = uplink && mixer && obs_data_get_bool(settings, "enabled");
+	// A new key or server, or "Only send while streaming" switched on while offline, does.
+	bool live = running_as(settings);
 	if (live)
 		apply_faders(settings);
 	pthread_mutex_unlock(&uplink_mu);

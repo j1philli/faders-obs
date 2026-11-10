@@ -31,7 +31,7 @@ Text (JSON) control messages:
 | hub → listener   | `{"type":"backlog","count":120}`                             | next `count` binary chunks are history    |
 | hub → listener   | `{"type":"live"}`                                            | following chunks are live                 |
 
-The hub never parses Opus. It reads `seq`/`tsMs` only, keeps a 60 s ring per channel, and fans chunks out byte-for-byte.
+The hub never parses Opus. It checks each chunk's framing, keeps a 60 s ring per channel, and fans chunks out byte-for-byte, minus any stem that isn't in the channel's list (one past the plan's allowance, or never announced). A plugin never sends audio encoded under an earlier stem list after announcing a new one.
 
 ## Everything else
 

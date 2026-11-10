@@ -62,6 +62,7 @@ struct chunk {
 	uint32_t seq;
 	uint8_t *data;
 	size_t len;
+	uint32_t gen; // the stem layout it was encoded under
 };
 
 struct fdr_uplink {
@@ -84,7 +85,8 @@ struct fdr_uplink {
 	int16_t packet_len[MAX_STEMS][FRAMES_PER_CHUNK];
 	float chunk_peak[MAX_STEMS];
 	int frames_in_chunk;
-	uint32_t layout_gen; // bumped (locked) whenever n_stems changes; a chunk never mixes layouts
+	uint32_t layout_gen; // bumped (locked) whenever the stem list changes; a chunk never mixes layouts
+	uint32_t announced_gen; // the layout the hub was last told (valid while !stems_dirty)
 	uint32_t chunk_gen;  // worker: the layout the chunk in progress was started with
 	int chunk_stems;     // worker: stems in that layout
 
@@ -229,20 +231,27 @@ static void send_status(struct fdr_uplink *u, uint64_t now)
 // any chunk with that layout (the hub forwards text in order).
 static void send_stems(struct fdr_uplink *u)
 {
+	// The whole announcement is read under the lock, with the layout it describes: the mixer
+	// can change the list at any moment, and a list that changed while this one was on its way
+	// must still go out afterwards.
 	pthread_mutex_lock(&u->mu);
 	bool send = u->stems_dirty && u->ws && u->connected;
 	int n = u->n_stems;
+	uint32_t gen = u->layout_gen;
+	bool rest_last = u->rest_last;
+	char names[MAX_STEMS][FDR_STEM_NAME_MAX];
+	memcpy(names, u->names, sizeof(names));
 	pthread_mutex_unlock(&u->mu);
-	if (!send)
+	if (!send || n < 1)
 		return;
 	struct dstr msg = {0};
 	dstr_copy(&msg, "{\"type\":\"stems\",\"stems\":[");
 	for (int s = 0; s < n; s++) {
-		if (u->rest_last && s == n - 1) {
+		if (rest_last && s == n - 1) {
 			dstr_catf(&msg, "%s{\"id\":%d,\"name\":\"Everything else\",\"rest\":true}", s ? "," : "", s);
 			continue;
 		}
-		const char *name = u->names[s];
+		const char *name = names[s];
 		dstr_catf(&msg, "%s{\"id\":%d,\"name\":\"", s ? "," : "", s);
 		for (const char *c = name; *c; c++) { // JSON string: escape quotes and backslashes, drop controls
 			if (*c == '"' || *c == '\\')
@@ -257,7 +266,9 @@ static void send_stems(struct fdr_uplink *u)
 	dstr_free(&msg);
 	if (ok) {
 		pthread_mutex_lock(&u->mu);
-		u->stems_dirty = false;
+		u->announced_gen = gen;
+		if (u->layout_gen == gen)
+			u->stems_dirty = false;
 		pthread_mutex_unlock(&u->mu);
 	}
 }
@@ -352,6 +363,7 @@ static void flush(struct fdr_uplink *u)
 	bool can_send = u->ws && u->connected && u->listeners > 0 && !u->stems_dirty;
 	int64_t last_sent = u->last_sent_seq; // on_open resets it from the network thread
 	uint32_t gen = u->conn_gen;
+	uint32_t layout = u->announced_gen;
 	pthread_mutex_unlock(&u->mu);
 	if (!can_send)
 		return;
@@ -359,6 +371,10 @@ static void flush(struct fdr_uplink *u)
 	for (uint32_t i = 0; i < BACKLOG_CHUNKS; i++) {
 		struct chunk *c = &u->backlog[(u->chunk_n + i) % BACKLOG_CHUNKS];
 		if (!c->data || (int64_t)c->seq <= last_sent)
+			continue;
+		// Audio encoded under an earlier stem list would be played under the one just announced
+		// (other names, other levels): it is never sent.
+		if (c->gen != layout)
 			continue;
 		if (!fdr_ws_send_binary(u->ws, c->data, c->len))
 			break; // not open / backed up: retry next tick
@@ -452,7 +468,7 @@ static void finish_chunk(struct fdr_uplink *u)
 	}
 	struct chunk *slot = &u->backlog[u->chunk_n % BACKLOG_CHUNKS];
 	bfree(slot->data);
-	*slot = (struct chunk){seq, out, size};
+	*slot = (struct chunk){seq, out, size, u->chunk_gen};
 	u->chunk_n++;
 	u->frames_in_chunk = 0;
 	memset(u->chunk_peak, 0, sizeof(u->chunk_peak));
@@ -581,21 +597,25 @@ void fdr_uplink_set_stems(fdr_uplink_t *u, const char *const *names, int n, bool
 			new_enc[s] = make_encoder(u->bitrate);
 	}
 	pthread_mutex_lock(&u->mu);
+	bool changed = n != u->n_stems || rest != u->rest_last;
 	for (int s = 0; s < n; s++) {
 		if (new_rings[s])
 			u->rings[s] = new_rings[s];
 		if (new_enc[s])
 			u->enc[s] = new_enc[s];
-		snprintf(u->names[s], sizeof(u->names[s]), "%s", names[s] ? names[s] : "");
+		char name[FDR_STEM_NAME_MAX];
+		snprintf(name, sizeof(name), "%s", names[s] ? names[s] : "");
+		changed = changed || strcmp(u->names[s], name) != 0;
+		memcpy(u->names[s], name, sizeof(name));
 	}
-	bool changed = n != u->n_stems || rest != u->rest_last;
-	for (int s = 0; s < n && !changed; s++)
-		changed = strcmp(u->names[s], names[s] ? names[s] : "") != 0;
-	u->n_stems = n;
-	u->rest_last = rest;
-	u->status.stems = n;
-	u->stems_dirty = true;
-	reset_rings(u); // a chunk has one layout: restart aligned
+	if (changed) {
+		// The same list again (any settings change re-applies it) leaves the audio alone.
+		u->n_stems = n;
+		u->rest_last = rest;
+		u->status.stems = n;
+		u->stems_dirty = true;
+		reset_rings(u); // a chunk has one layout: restart aligned (and a new layout generation)
+	}
 	pthread_mutex_unlock(&u->mu);
 	if (changed)
 		blog(LOG_INFO, "[faders] stems: %d layer(s)%s", n, rest ? " incl. Everything else" : "");

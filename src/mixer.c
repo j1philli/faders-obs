@@ -24,7 +24,7 @@
 #define RATE 48000
 #define FRAMES AUDIO_OUTPUT_FRAMES // 1024 per tick
 #define CH 2
-#define MAX_ENTRIES 64
+#define MAX_ENTRIES 256
 #define REST FDR_MAX_FADERS // fader index meaning "Everything else"
 // Oracle: per ~0.5 s window (24 ticks), the residual correlated with a source's contribution.
 // |r| > 0.5 for 3 windows in a row means the source isn't in the stream the way we include it:
@@ -51,6 +51,7 @@ struct entry {
 
 struct snapshot {
 	int n;
+	bool overflow; // more audio sources than entries
 	struct entry e[MAX_ENTRIES];
 };
 
@@ -108,6 +109,8 @@ struct fdr_mixer {
 	struct stats st;
 
 	obs_weak_source_t *tr; // transition whose signals we're connected to
+	pthread_mutex_t tr_mu; // one track_transition at a time; never taken by a signal handler
+	bool overflow_warned;
 	bool signals;
 	// Core signals fire while libobs holds its own locks, so they only flag; this thread does
 	// the rebuild (which enumerates sources) a moment later.
@@ -215,13 +218,18 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 	static int8_t side[MAX_ENTRIES]; // 0 = A-only candidate, 1 = B-only, -1 = decided already
 	static struct obs_source_audio_mix tmix;
 	const float *tout_l = NULL, *tout_r = NULL;
+	// Mix buffers belong to their sources, and several are read again further down (the
+	// candidates, the oracle, extra faders). A source removed meanwhile would free them, so
+	// every source whose buffer is kept stays referenced until the tick is done.
+	static obs_source_t *held[MAX_ENTRIES + 1];
+	int n_held = 0;
 	if (ambiguous) {
 		obs_source_t *t = m->tr ? obs_weak_source_get_source(m->tr) : NULL;
 		if (t) {
 			obs_source_get_audio_mix(t, &tmix);
 			tout_l = tmix.output[m->mix_idx].data[0];
 			tout_r = tmix.output[m->mix_idx].data[1];
-			obs_source_release(t);
+			held[n_held++] = t;
 		}
 		if (!tout_l)
 			ambiguous = false; // no transition buffer to compare with: fall back to the signals
@@ -295,7 +303,7 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 			contrib[k][0] = il;
 			contrib[k][1] = ir;
 			why[k] = in_a ? 'a' : 'b';
-			obs_source_release(s);
+			held[n_held++] = s;
 			continue;
 		}
 		if (in_a && !in_b && m->fade.stopped) {
@@ -330,7 +338,7 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 		inc[k] = true;
 		why[k] = per_sample ? 'f' : 'I';
 		m->st.included[k]++;
-		obs_source_release(s);
+		held[n_held++] = s;
 	}
 
 	if (ambiguous) {
@@ -476,6 +484,8 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 	if (m->st.n_cb < MAX_CB)
 		m->st.cb_ns[m->st.n_cb++] = t_out - t_in;
 	pthread_mutex_unlock(&m->mu);
+	for (int i = 0; i < n_held; i++)
+		obs_source_release(held[i]);
 	fdr_uplink_push_tick(m->uplink, ts, outp, n_wire + 1, FRAMES, track_peak);
 }
 
@@ -614,8 +624,12 @@ struct collect {
 static bool collect_cb(void *param, obs_source_t *s)
 {
 	struct collect *c = param;
-	if (!is_audio_input(s) || c->snap->n >= MAX_ENTRIES)
+	if (!is_audio_input(s))
 		return true;
+	if (c->snap->n >= MAX_ENTRIES) {
+		c->snap->overflow = true;
+		return true;
+	}
 	struct entry *e = &c->snap->e[c->snap->n];
 	memset(e, 0, sizeof(*e));
 	e->weak = obs_source_get_weak_source(s);
@@ -647,32 +661,42 @@ static void free_snapshot(struct snapshot *s)
 static void on_transition_start(void *data, calldata_t *cd);
 static void on_transition_stop(void *data, calldata_t *cd);
 
-// Locked. Follow whichever transition sits on output channel 0 (the program).
+// Follow whichever transition sits on output channel 0 (the program). Not under m->mu: libobs
+// calls signal handlers with the signal's own lock held, and ours take m->mu, so connecting or
+// disconnecting while holding m->mu could deadlock against a transition starting. tr_mu keeps
+// two rebuilds from doing this at once; no handler ever takes it.
 static void track_transition(struct fdr_mixer *m)
 {
+	pthread_mutex_lock(&m->tr_mu);
 	obs_source_t *t = obs_get_output_source(0);
 	if (t && obs_source_get_type(t) != OBS_SOURCE_TYPE_TRANSITION) {
 		obs_source_release(t);
 		t = NULL;
 	}
+	pthread_mutex_lock(&m->mu);
 	obs_source_t *old = m->tr ? obs_weak_source_get_source(m->tr) : NULL;
+	pthread_mutex_unlock(&m->mu);
 	if (old != t) {
 		if (old) {
 			signal_handler_t *sh = obs_source_get_signal_handler(old);
 			signal_handler_disconnect(sh, "transition_start", on_transition_start, m);
 			signal_handler_disconnect(sh, "transition_stop", on_transition_stop, m);
 		}
-		obs_weak_source_release(m->tr);
-		m->tr = NULL;
+		obs_weak_source_t *weak = t ? obs_source_get_weak_source(t) : NULL;
+		pthread_mutex_lock(&m->mu);
+		obs_weak_source_t *was = m->tr;
+		m->tr = weak;
+		pthread_mutex_unlock(&m->mu);
+		obs_weak_source_release(was);
 		if (t) {
 			signal_handler_t *sh = obs_source_get_signal_handler(t);
 			signal_handler_connect(sh, "transition_start", on_transition_start, m);
 			signal_handler_connect(sh, "transition_stop", on_transition_stop, m);
-			m->tr = obs_source_get_weak_source(t);
 		}
 	}
 	obs_source_release(old);
 	obs_source_release(t);
+	pthread_mutex_unlock(&m->tr_mu);
 }
 
 void fdr_mixer_rebuild(fdr_mixer_t *m)
@@ -685,8 +709,12 @@ void fdr_mixer_rebuild(fdr_mixer_t *m)
 	obs_enum_sources(collect_cb, &c);
 	struct snapshot *old = m->snap;
 	m->snap = snap;
-	track_transition(m);
+	bool warn = snap->overflow && !m->overflow_warned;
+	m->overflow_warned = m->overflow_warned || snap->overflow;
 	pthread_mutex_unlock(&m->mu);
+	if (warn)
+		blog(LOG_WARNING, "[faders] more than %d audio sources: the ones past that are left in Everything else", MAX_ENTRIES);
+	track_transition(m);
 	free_snapshot(old);
 }
 
@@ -853,6 +881,7 @@ fdr_mixer_t *fdr_mixer_start(fdr_uplink_t *uplink, int stream_track)
 	struct fdr_mixer *m = bzalloc(sizeof(*m));
 	m->uplink = uplink;
 	pthread_mutex_init(&m->mu, NULL);
+	pthread_mutex_init(&m->tr_mu, NULL);
 	m->max_stems = FDR_MAX_FADERS;
 	m->stream_track = stream_track < 1 || stream_track > 6 ? 1 : stream_track;
 	m->mix_idx = (size_t)(m->stream_track - 1);
@@ -875,7 +904,8 @@ void fdr_mixer_stop(fdr_mixer_t *m)
 	os_event_signal(m->stop_ev);
 	pthread_join(m->thread, NULL);
 	os_event_destroy(m->stop_ev);
-	pthread_mutex_lock(&m->mu);
+	// Every other thread that touches the mixer has stopped. A transition handler may still be
+	// running: disconnecting waits for it, so m->mu must be free here.
 	obs_source_t *t = m->tr ? obs_weak_source_get_source(m->tr) : NULL;
 	if (t) {
 		signal_handler_t *sh = obs_source_get_signal_handler(t);
@@ -883,6 +913,7 @@ void fdr_mixer_stop(fdr_mixer_t *m)
 		signal_handler_disconnect(sh, "transition_stop", on_transition_stop, m);
 		obs_source_release(t);
 	}
+	pthread_mutex_lock(&m->mu);
 	obs_weak_source_release(m->tr);
 	struct snapshot *snap = m->snap;
 	m->snap = NULL;
@@ -891,6 +922,7 @@ void fdr_mixer_stop(fdr_mixer_t *m)
 	pthread_mutex_unlock(&m->mu);
 	free_snapshot(snap);
 	pthread_mutex_destroy(&m->mu);
+	pthread_mutex_destroy(&m->tr_mu);
 	bfree(m);
 	blog(LOG_INFO, "[faders] virtual mixer stopped");
 }
