@@ -46,10 +46,10 @@ void fdr_mixer_set_transition_duration(fdr_mixer_t *m, int duration_ms);
 // allowance: faders past max_stems are folded into Everything else, never dropped.
 void fdr_mixer_set_faders(fdr_mixer_t *m, const char *const *names, int n, int max_stems);
 // OBS tracks as fader inputs: faders[t] is the fader for Track t+1 (a name, "" for Everything
-// else, NULL = the track isn't used). A source that isn't on a fader of its own goes to the fader
-// of the lowest-numbered assigned track it is ticked for (the streamed track is never one); only
-// then does the starting guess apply. Each source still lands in exactly one fader, so the mix stays
-// exact. Ticking or unticking a track in OBS is followed within a moment.
+// else, NULL = the track isn't used). Every source ticked for the track plays on that fader (the
+// streamed track is never one). Nothing is de-duplicated: a source that is also on a fader of its
+// own, or ticked for another assigned track, plays on each. Ticking or unticking a track in OBS is
+// followed within a moment.
 void fdr_mixer_set_track_faders(fdr_mixer_t *m, const char *const faders[6]);
 // Re-read the sources and their assignments (after a change the mixer didn't see itself).
 void fdr_mixer_rebuild(fdr_mixer_t *m);
@@ -63,8 +63,6 @@ const char *fdr_mixer_fader_name(fdr_mixer_t *m, int i);
 const char *fdr_mixer_auto_fader(obs_source_t *src);
 // The fader a source is in right now, given the configured names (NULL = Everything else).
 const char *fdr_mixer_effective_fader(fdr_mixer_t *m, obs_source_t *src);
-// The assigned track (1-6) that decides an unassigned source's fader, or 0 when none does.
-int fdr_mixer_track_for(fdr_mixer_t *m, obs_source_t *src);
 // Set a source's assignment (fader name, "" for Everything else, NULL for auto) and rebuild.
 void fdr_mixer_assign(fdr_mixer_t *m, obs_source_t *src, const char *fader);
 

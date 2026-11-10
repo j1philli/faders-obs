@@ -40,6 +40,7 @@ struct entry {
 	obs_weak_source_t *weak;
 	char name[64];
 	int fader; // 0..n_faders-1 (folded ones already mapped to REST) or REST
+	uint32_t extra; // more faders it also plays on (bitmask): a source on a fader and on a track
 	uint32_t mixers; // the source's track ticks when this snapshot was built
 	bool force;
 	// Oracle sums for the current window (audio thread).
@@ -416,6 +417,7 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 				if (e->run >= ORACLE_RUNS && !drop && m->n_dropped < MAX_ENTRIES) {
 					drop = e->name;
 					e->fader = REST;
+					e->extra = 0;
 					e->dropped = true;
 					obs_weak_source_addref(e->weak);
 					m->dropped[m->n_dropped++] = e->weak;
@@ -428,6 +430,23 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 			snprintf(m->mismatch, sizeof(m->mismatch), "%s", drop);
 			blog(LOG_WARNING, "[faders] \"%s\" is sent to Faders but is not in your stream (Track %d) the same way: moved to Everything else for this session. Check the source's track and that it isn't captured twice.", drop, m->stream_track);
 			fdr_uplink_set_mismatch(m->uplink, drop);
+		}
+	}
+
+	// A source on more than one fader plays on each of them. Everything else was measured with it
+	// counted once, so the remainder stays what the stream has that no fader does; with every
+	// fader at 100% such a source is louder for viewers than in the stream.
+	for (int k = 0; k < n; k++) {
+		if (!inc[k] || !snap->e[k].extra)
+			continue;
+		for (int f = 0; f < n_wire; f++) {
+			if (!(snap->e[k].extra & (1u << f)))
+				continue;
+			float *dst_l = acc[f][0], *dst_r = acc[f][1];
+			for (size_t i = 0; i < FRAMES; i++) {
+				dst_l[i] += contrib[k][0][i];
+				dst_r[i] += contrib[k][1][i];
+			}
 		}
 	}
 
@@ -538,46 +557,43 @@ static int fader_index(struct fdr_mixer *m, const char *name)
 	return -1;
 }
 
-// Locked. The lowest-numbered assigned track (0-5) the source is ticked for, or -1. The streamed
-// track is never one: everything in the stream is on it.
-static int deciding_track(struct fdr_mixer *m, obs_source_t *src)
-{
-	if (!m->any_track)
-		return -1;
-	uint32_t mixers = obs_source_get_audio_mixers(src);
-	for (int t = 0; t < 6; t++)
-		if (m->track_set[t] && (mixers & (1u << t)) && (1u << t) != m->stream_bit)
-			return t;
-	return -1;
-}
-
-// Locked. The fader index for a source: the fader it was put on by name; else the fader of an
-// assigned track it is ticked for (a track carries everything ticked for it that isn't on a fader
-// of its own, including sources taken off a fader); else Everything else if it was taken off, or
-// the rule table's starting guess (with the table's fallbacks when that fader doesn't exist).
-// Folded faders → REST.
-static int resolve_fader(struct fdr_mixer *m, obs_source_t *src, bool *is_auto)
+// Locked. Where a source plays. Its own fader: the one it was put on by name, or, if it was never
+// placed, the rule table's starting guess (with the table's fallbacks when that fader doesn't
+// exist). Plus the fader of every assigned track it is ticked for (never the streamed track:
+// everything in the stream is on it). Nothing is de-duplicated: a source on a fader of its own
+// that is also ticked for a track on another fader plays on both. Returns the first fader (REST
+// when there is none; folded faders count as REST) and sets *extra to a bitmask of the others.
+static int resolve_fader(struct fdr_mixer *m, obs_source_t *src, uint32_t *extra)
 {
 	obs_data_t *priv = obs_source_get_private_settings(src);
-	bool automatic = !obs_data_has_user_value(priv, FDR_FADER_SETTING);
-	int idx = automatic ? -1 : fader_index(m, obs_data_get_string(priv, FDR_FADER_SETTING));
-	int track = idx < 0 ? deciding_track(m, src) : -1;
-	if (idx >= 0 || (!automatic && track < 0)) {
-		// on a fader of its own, or taken off with no track to carry it
-	} else if (track >= 0) {
-		idx = fader_index(m, m->track_fader[track]); // "" or an unknown name: Everything else
+	int own;
+	if (obs_data_has_user_value(priv, FDR_FADER_SETTING)) {
+		own = fader_index(m, obs_data_get_string(priv, FDR_FADER_SETTING));
 	} else {
 		const char *pick = fdr_mixer_auto_fader(src);
-		idx = fader_index(m, pick);
-		if (idx < 0 && pick && strcmp(pick, "Discord") == 0)
-			idx = fader_index(m, "Voice");
+		own = fader_index(m, pick);
+		if (own < 0 && pick && strcmp(pick, "Discord") == 0)
+			own = fader_index(m, "Voice");
 	}
 	obs_data_release(priv);
-	if (is_auto)
-		*is_auto = automatic;
-	if (idx < 0 || idx >= m->n_wire)
-		return REST;
-	return idx;
+	uint32_t set = own >= 0 && own < m->n_wire ? 1u << own : 0;
+	if (m->any_track) {
+		uint32_t mixers = obs_source_get_audio_mixers(src);
+		for (int t = 0; t < 6; t++) {
+			if (!m->track_set[t] || !(mixers & (1u << t)) || (1u << t) == m->stream_bit)
+				continue;
+			int f = fader_index(m, m->track_fader[t]); // "" or an unknown name: Everything else
+			if (f >= 0 && f < m->n_wire)
+				set |= 1u << f;
+		}
+	}
+	int first = REST;
+	for (int f = 0; f < m->n_wire && first == REST; f++)
+		if (set & (1u << f))
+			first = f;
+	if (extra)
+		*extra = first == REST ? 0 : set & ~(1u << first);
+	return first;
 }
 
 static bool is_audio_input(obs_source_t *s)
@@ -600,7 +616,7 @@ static bool collect_cb(void *param, obs_source_t *s)
 	memset(e, 0, sizeof(*e));
 	e->weak = obs_source_get_weak_source(s);
 	snprintf(e->name, sizeof(e->name), "%s", obs_source_get_name(s));
-	e->fader = resolve_fader(c->m, s, NULL);
+	e->fader = resolve_fader(c->m, s, &e->extra);
 	e->mixers = obs_source_get_audio_mixers(s);
 	obs_data_t *priv = obs_source_get_private_settings(s);
 	e->force = obs_data_get_bool(priv, FDR_FORCE_SETTING);
@@ -608,6 +624,7 @@ static bool collect_cb(void *param, obs_source_t *s)
 	for (int i = 0; i < c->m->n_dropped; i++)
 		if (obs_weak_source_references_source(c->m->dropped[i], s)) {
 			e->fader = REST;
+			e->extra = 0;
 			e->dropped = true;
 		}
 	c->snap->n++;
@@ -950,19 +967,6 @@ void fdr_mixer_set_track_faders(fdr_mixer_t *m, const char *const faders[6])
 	pthread_mutex_unlock(&m->mu);
 	if (changed)
 		fdr_mixer_rebuild(m);
-}
-
-int fdr_mixer_track_for(fdr_mixer_t *m, obs_source_t *src)
-{
-	if (!m || !src)
-		return 0;
-	obs_data_t *priv = obs_source_get_private_settings(src);
-	pthread_mutex_lock(&m->mu);
-	bool own = obs_data_has_user_value(priv, FDR_FADER_SETTING) && fader_index(m, obs_data_get_string(priv, FDR_FADER_SETTING)) >= 0;
-	int t = own ? -1 : deciding_track(m, src);
-	pthread_mutex_unlock(&m->mu);
-	obs_data_release(priv);
-	return t + 1;
 }
 
 int fdr_mixer_fader_count(fdr_mixer_t *m)

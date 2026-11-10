@@ -19,9 +19,10 @@ transitions). Your Twitch stream is not touched.
   underneath) and "Only send while
   streaming". There is no "Auto": sources the rule table in `PROTOCOL.md` recognises start on
   their fader and show as ordinary rows. A track on a fader is an assignment rule, not a second
-  audio path: every source ticked for it that isn't on a fader of its own resolves to that fader
-  (lowest such track first), so each source is still in exactly one fader and the mix stays
-  exact. The dialog asks OBS to redraw after each change (`obs_source_update_properties`).
+  audio path: every source ticked for it plays on that fader. Nothing is de-duplicated: a source
+  that also has a fader of its own, or is ticked for another assigned track, plays on each, and
+  then the layers add up to more than the stream for that source (Everything else is still
+  measured with every source counted once). The dialog asks OBS to redraw after each change (`obs_source_update_properties`).
   Scripting: `faders_assign`, `faders_assign_track`; tests drive the real properties with
   `faders_dialog` / `faders_dialog_set`. The
   server is `wss://hub.faders.tv/ingest` (the key identifies the channel); tests point it

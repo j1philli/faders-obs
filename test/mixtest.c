@@ -460,35 +460,35 @@ int main(int argc, char **argv)
 	os_sleep_ms(500);
 
 	// ── 6b: an OBS track as a fader input ───────────────────────────────────────────────
-	// "extra" has no assignment of its own. Ticked for Track 3, with Track 3 → Music, it joins
-	// Music and leaves Everything else; "game" is on Track 3 too but keeps its own choice.
+	// Track 3 → Music brings everything ticked for Track 3: "extra" (on no fader) and "game",
+	// which is also on Game and so plays on both. Nothing is de-duplicated.
 	obs_source_set_audio_mixers(extra, 1 | 4);
 	obs_source_set_audio_mixers(game, 1 | 4);
 	assign_track(3, "Music");
 	window(800, 600);
-	double music_with_extra = sqrt(R_MUSIC * R_MUSIC + R_EXTRA * R_EXTRA);
-	result(close_to(fader_rms("Music"), music_with_extra, 0.03) && close_to(fader_rms("Game"), R_GAME, 0.03) && rest_dbfs() < -60.0 && mismatch()[0] == 0, "6b track → fader carries its unassigned sources",
-	       "Music %.4f (want %.4f: music + extra), Game %.4f (want %.4f: its own choice wins), rest %.1f dBFS, mismatch \"%s\"", fader_rms("Music"), music_with_extra, fader_rms("Game"), R_GAME, rest_dbfs(), mismatch());
+	double music_with_track = sqrt(R_MUSIC * R_MUSIC + R_EXTRA * R_EXTRA + R_GAME * R_GAME);
+	result(close_to(fader_rms("Music"), music_with_track, 0.03) && close_to(fader_rms("Game"), R_GAME, 0.03) && rest_dbfs() < -60.0 && mismatch()[0] == 0, "6b track → fader carries everything ticked for it",
+	       "Music %.4f (want %.4f: music + extra + game), Game %.4f (want %.4f: game is on both), rest %.1f dBFS, mismatch \"%s\"", fader_rms("Music"), music_with_track, fader_rms("Game"), R_GAME, rest_dbfs(), mismatch());
 	// Unticking the track in OBS is followed without any call to the plugin.
 	obs_source_set_audio_mixers(extra, 1);
+	obs_source_set_audio_mixers(game, 1);
 	window(800, 600);
-	result(close_to(fader_rms("Music"), R_MUSIC, 0.03) && close_to(rest_rms(), R_EXTRA, 0.03), "6c unticking the track moves the source back", "Music %.4f (want %.4f), rest %.4f (want %.4f)", fader_rms("Music"), R_MUSIC,
+	result(close_to(fader_rms("Music"), R_MUSIC, 0.03) && close_to(rest_rms(), R_EXTRA, 0.03), "6c unticking the track takes the sources off", "Music %.4f (want %.4f), rest %.4f (want %.4f)", fader_rms("Music"), R_MUSIC,
 	       rest_rms(), R_EXTRA);
-	// Ticked for two assigned tracks, the lower-numbered one decides: still exactly one fader.
+	// Ticked for two tracks that are on faders: it plays on both.
 	obs_source_set_audio_mixers(extra, 1 | 2 | 4);
 	assign_track(2, "Voice");
 	window(800, 600);
-	double voice_with_extra = sqrt(R_VOICE * R_VOICE + R_EXTRA * R_EXTRA);
-	result(close_to(fader_rms("Voice"), voice_with_extra, 0.03) && close_to(fader_rms("Music"), R_MUSIC, 0.03) && rest_dbfs() < -60.0, "6d two assigned tracks: the lower one decides",
-	       "Voice %.4f (want %.4f: voice + extra), Music %.4f (want %.4f), rest %.1f dBFS", fader_rms("Voice"), voice_with_extra, fader_rms("Music"), R_MUSIC, rest_dbfs());
+	double voice_with_extra = sqrt(R_VOICE * R_VOICE + R_EXTRA * R_EXTRA), music_with_extra = sqrt(R_MUSIC * R_MUSIC + R_EXTRA * R_EXTRA);
+	result(close_to(fader_rms("Voice"), voice_with_extra, 0.03) && close_to(fader_rms("Music"), music_with_extra, 0.03) && rest_dbfs() < -60.0 && mismatch()[0] == 0, "6d two tracks on faders: the source plays on both",
+	       "Voice %.4f (want %.4f), Music %.4f (want %.4f), rest %.1f dBFS, mismatch \"%s\"", fader_rms("Voice"), voice_with_extra, fader_rms("Music"), music_with_extra, rest_dbfs(), mismatch());
 	// A track sent to Everything else, then not used at all: the source is in the residual again.
+	assign_track(3, "none");
 	assign_track(2, "");
 	window(800, 600);
 	double rest_via_track = rest_rms();
 	assign_track(2, "none");
-	assign_track(3, "none");
 	obs_source_set_audio_mixers(extra, 1);
-	obs_source_set_audio_mixers(game, 1);
 	window(800, 600);
 	result(close_to(rest_via_track, R_EXTRA, 0.03) && close_to(rest_rms(), R_EXTRA, 0.03) && close_to(fader_rms("Voice"), R_VOICE, 0.03) && close_to(fader_rms("Music"), R_MUSIC, 0.03),
 	       "6e track → Everything else, and tracks unused again", "rest via track %.4f, after %.4f (want %.4f); Voice %.4f Music %.4f", rest_via_track, rest_rms(), R_EXTRA, fader_rms("Voice"), fader_rms("Music"));
@@ -514,8 +514,8 @@ int main(int argc, char **argv)
 		       strstr(dialog(), "Everything else: extra"),
 	       "6g dialog: add a source to a fader, then remove it", "added: Voice %.4f (want %.4f), rest %.1f dBFS, row %s; removed: Voice %.4f, rest %.4f (want %.4f)", voice_plus, sqrt(R_VOICE * R_VOICE + R_EXTRA * R_EXTRA), rest_added,
 	       extra_key, fader_rms("Voice"), rest_rms(), R_EXTRA);
-	// A track goes on a fader the same way, and carries what's ticked for it, including a source
-	// that was taken off a fader; a source on a fader of its own (game) stays there.
+	// A track goes on a fader the same way, and carries everything ticked for it: a source that
+	// was taken off a fader (extra) and one that has a fader of its own (game, now on both).
 	obs_source_set_audio_mixers(extra, 1 | 4);
 	obs_source_set_audio_mixers(game, 1 | 4);
 	bool track_picked = dialog_pick("add:2", "OBS Track 3");
@@ -536,9 +536,9 @@ int main(int argc, char **argv)
 	obs_source_set_audio_mixers(extra, 1);
 	obs_source_set_audio_mixers(game, 1);
 	window(800, 600);
-	result(track_picked && track_row && track_removed && close_to(music_track, music_with_extra, 0.03) && close_to(game_track, R_GAME, 0.03) && rest_track < -60.0 && close_to(fader_rms("Music"), R_MUSIC, 0.03) &&
+	result(track_picked && track_row && track_removed && close_to(music_track, music_with_track, 0.03) && close_to(game_track, R_GAME, 0.03) && rest_track < -60.0 && close_to(fader_rms("Music"), R_MUSIC, 0.03) &&
 		       close_to(rest_rms(), R_EXTRA, 0.03),
-	       "6h dialog: a track on a fader, then removed", "track on Music: Music %.4f (want %.4f), Game %.4f, rest %.1f dBFS, row %s; removed: Music %.4f, rest %.4f", music_track, music_with_extra, game_track, rest_track, track_key,
+	       "6h dialog: a track on a fader, then removed", "track on Music: Music %.4f (want %.4f), Game %.4f, rest %.1f dBFS, row %s; removed: Music %.4f, rest %.4f", music_track, music_with_track, game_track, rest_track, track_key,
 	       fader_rms("Music"), rest_rms());
 
 	// From here the residual should be ~0: put the extra tone in a fader.

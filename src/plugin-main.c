@@ -331,8 +331,8 @@ static void src_defaults(obs_data_t *s)
 struct dialog_item {
 	char id[80];
 	char label[96];
-	int fader;   // index into the names, or -1: Everything else (a track: not used)
-	int via;     // a source placed by an assigned track (1-6), else 0: it has no row of its own
+	int fader;   // index into the names it has a row under, or -1: none (a track: not used)
+	int via;     // a source with no row that an assigned track (1-6) brings to a fader, else 0
 	bool track;
 };
 
@@ -371,22 +371,21 @@ static bool add_dialog_source(void *param, obs_source_t *s)
 	memset(it, 0, sizeof(*it));
 	snprintf(it->id, sizeof(it->id), ITEM_SRC "%s", obs_source_get_uuid(s));
 	snprintf(it->label, sizeof(it->label), "%s", obs_source_get_name(s));
-	// Where the mixer puts it: the streamer's own choice, else an assigned track it is ticked
-	// for, else the plugin's starting guess from the kind of source.
+	// Its own row: the fader the streamer put it on, or the plugin's starting guess from the kind
+	// of source. Tracks don't change that; they add to it.
 	obs_data_t *priv = obs_source_get_private_settings(s);
-	bool placed = obs_data_has_user_value(priv, FDR_FADER_SETTING);
-	it->fader = placed ? name_index(m, obs_data_get_string(priv, FDR_FADER_SETTING)) : -1;
+	if (obs_data_has_user_value(priv, FDR_FADER_SETTING)) {
+		it->fader = name_index(m, obs_data_get_string(priv, FDR_FADER_SETTING));
+	} else {
+		const char *pick = fdr_mixer_auto_fader(s);
+		it->fader = name_index(m, pick);
+		if (it->fader < 0 && pick && strcmp(pick, "Discord") == 0)
+			it->fader = name_index(m, "Voice");
+	}
 	if (it->fader < 0) {
 		const char *choice = NULL;
-		it->via = settings_track_for(m->settings, s, &choice);
-		if (it->via) {
-			it->fader = name_index(m, choice);
-		} else if (!placed) {
-			const char *pick = fdr_mixer_auto_fader(s);
-			it->fader = name_index(m, pick);
-			if (it->fader < 0 && pick && strcmp(pick, "Discord") == 0)
-				it->fader = name_index(m, "Voice");
-		}
+		int t = settings_track_for(m->settings, s, &choice);
+		it->via = t && name_index(m, choice) >= 0 ? t : 0;
 	}
 	obs_data_release(priv);
 	return true;
@@ -436,7 +435,7 @@ static void add_dialog_row(obs_properties_t *group, struct dialog_model *m, int 
 		obs_property_list_add_string(p, "Add a source or track…", "");
 	for (int i = 0; !current && i < m->n_items; i++) {
 		const struct dialog_item *it = &m->items[i];
-		if (it->fader >= 0 && !it->via) // already on a fader
+		if (it->fader >= 0) // already has a row on a fader
 			continue;
 		obs_property_list_add_string(p, it->label, it->id);
 	}
@@ -459,7 +458,7 @@ static void add_assignment_rows(obs_properties_t *group, obs_data_t *settings)
 		strcat(dialog_names, "\n");
 		bool first = true;
 		for (int i = 0; i < m.n_items; i++) {
-			if (m.items[i].fader != f || m.items[i].via)
+			if (m.items[i].fader != f)
 				continue;
 			add_dialog_row(group, &m, f, &m.items[i], first);
 			first = false;
@@ -470,7 +469,7 @@ static void add_assignment_rows(obs_properties_t *group, obs_data_t *settings)
 	// isn't left over).
 	struct dstr rest = {0};
 	for (int i = 0; i < m.n_items; i++) {
-		if (m.items[i].track || m.items[i].fader >= 0)
+		if (m.items[i].track || m.items[i].fader >= 0 || m.items[i].via)
 			continue;
 		dstr_cat(&rest, rest.len ? ", " : "");
 		dstr_cat(&rest, m.items[i].label);
