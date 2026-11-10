@@ -42,9 +42,7 @@ MODULE_EXPORT const char *obs_module_description(void)
 #define DEFAULT_SERVER "wss://hub.faders.tv/ingest"
 // Settings keys (settings.json in the plugin's config folder).
 #define S_FADERS "faders" // editable list: [{"value":"Voice"},…]
-#define SRC_PREFIX "src:" // per-source dropdowns in the dialog: "src:<uuid>" → fader name / "~rest" / "~auto"
 #define CHOICE_REST "~rest"
-#define CHOICE_AUTO "~auto"
 // OBS tracks as fader inputs: "track:<1-6>" → fader name / "~rest" / "~none" (the default).
 #define TRACK_PREFIX "track:"
 #define CHOICE_NONE "~none"
@@ -318,69 +316,179 @@ static void src_defaults(obs_data_t *s)
 	obs_data_array_release(arr);
 }
 
-struct source_rows {
-	obs_properties_t *group;
-	obs_data_t *settings;
-	char names[FDR_MAX_FADERS][FDR_STEM_NAME_MAX];
-	int n;
-	int rows;
+// ── The dialog: one block per fader, with a dropdown for each source or track on it ───
+// Rows are rebuilt from what's true (each source's private setting, the track settings) whenever
+// the dialog opens or an assignment changes; the table below remembers what each dropdown showed,
+// so an update can tell which one the streamer changed.
+#define ROW_PREFIX "row:" // "row:<n>": one source or track on a fader
+#define ADD_PREFIX "add:" // "add:<fader index>": the "Add a source or track…" dropdown
+#define ITEM_SRC "s:"     // dropdown values: "s:<source uuid>", "t:<track 1-6>"
+#define ITEM_TRACK "t:"
+#define CHOICE_REMOVE "~remove"
+#define MAX_ITEMS 128
+#define MAX_DIALOG_ROWS 192
+
+struct dialog_item {
+	char id[80];
+	char label[96];
+	int fader;   // index into the names, or -1: Everything else (a track: not used)
+	int via;     // a source placed by an assigned track (1-6), else 0: it has no row of its own
+	bool track;
 };
 
-static bool add_source_row(void *param, obs_source_t *s)
+struct dialog_model {
+	char names[FDR_MAX_FADERS][FDR_STEM_NAME_MAX];
+	int n;
+	struct dialog_item items[MAX_ITEMS];
+	int n_items;
+	obs_data_t *settings;
+};
+
+struct dialog_row {
+	char key[24];
+	char fader[FDR_STEM_NAME_MAX];
+	char item[80]; // "" for an add dropdown
+};
+static struct dialog_row dialog_rows[MAX_DIALOG_ROWS];
+static int n_dialog_rows;
+static char dialog_names[FDR_MAX_FADERS * FDR_STEM_NAME_MAX]; // the fader list the rows were built for
+
+static int name_index(const struct dialog_model *m, const char *name)
 {
-	struct source_rows *r = param;
+	for (int i = 0; name && *name && i < m->n; i++)
+		if (astrcmpi(m->names[i], name) == 0)
+			return i;
+	return -1;
+}
+
+static bool add_dialog_source(void *param, obs_source_t *s)
+{
+	struct dialog_model *m = param;
 	uint32_t flags = obs_source_get_output_flags(s);
-	if (!(flags & OBS_SOURCE_AUDIO) || (flags & OBS_SOURCE_COMPOSITE) || obs_source_get_type(s) != OBS_SOURCE_TYPE_INPUT)
+	if (!(flags & OBS_SOURCE_AUDIO) || (flags & OBS_SOURCE_COMPOSITE) || obs_source_get_type(s) != OBS_SOURCE_TYPE_INPUT || m->n_items >= MAX_ITEMS)
 		return true;
-	char key[80];
-	snprintf(key, sizeof(key), SRC_PREFIX "%s", obs_source_get_uuid(s));
-	obs_property_t *p = obs_properties_add_list(r->group, key, obs_source_get_name(s), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
-	const char *pick = fdr_mixer_auto_fader(s);
-	// The automatic pick, as the mixer resolves it against the configured faders.
-	const char *resolved = NULL;
-	for (int i = 0; i < r->n && !resolved; i++)
-		if (pick && astrcmpi(r->names[i], pick) == 0)
-			resolved = r->names[i];
-	if (!resolved && pick && strcmp(pick, "Discord") == 0)
-		for (int i = 0; i < r->n && !resolved; i++)
-			if (astrcmpi(r->names[i], "Voice") == 0)
-				resolved = r->names[i];
-	char auto_label[96];
-	// An assigned track the source is ticked for decides before the rules do.
-	const char *track_choice = NULL;
-	int track = settings_track_for(r->settings, s, &track_choice);
-	if (track) {
-		resolved = NULL;
-		for (int i = 0; i < r->n && !resolved; i++)
-			if (astrcmpi(r->names[i], track_choice) == 0)
-				resolved = r->names[i];
-		snprintf(auto_label, sizeof(auto_label), "Auto (→ %s, from Track %d)", resolved ? resolved : "Everything else", track);
-	} else {
-		snprintf(auto_label, sizeof(auto_label), "Auto (→ %s)", resolved ? resolved : "Everything else");
-	}
-	obs_property_list_add_string(p, auto_label, CHOICE_AUTO);
-	for (int i = 0; i < r->n; i++)
-		obs_property_list_add_string(p, r->names[i], r->names[i]);
-	obs_property_list_add_string(p, "Everything else", CHOICE_REST);
-	// What the dialog shows: the source's current assignment.
+	struct dialog_item *it = &m->items[m->n_items++];
+	memset(it, 0, sizeof(*it));
+	snprintf(it->id, sizeof(it->id), ITEM_SRC "%s", obs_source_get_uuid(s));
+	snprintf(it->label, sizeof(it->label), "%s", obs_source_get_name(s));
+	// Where the mixer puts it: the streamer's own choice, else an assigned track it is ticked
+	// for, else the plugin's starting guess from the kind of source.
 	obs_data_t *priv = obs_source_get_private_settings(s);
-	const char *cur = obs_data_has_user_value(priv, FDR_FADER_SETTING) ? obs_data_get_string(priv, FDR_FADER_SETTING) : CHOICE_AUTO;
-	if (cur[0] == 0)
-		cur = CHOICE_REST;
-	else if (strcmp(cur, CHOICE_AUTO) != 0) {
-		bool known = false;
-		for (int i = 0; i < r->n; i++)
-			known = known || astrcmpi(r->names[i], cur) == 0;
-		if (!known) { // assigned to a fader that no longer exists: shown as is, mixes as Everything else
-			char label[96];
-			snprintf(label, sizeof(label), "%s (no such fader: Everything else)", cur);
-			obs_property_list_add_string(p, label, cur);
+	bool placed = obs_data_has_user_value(priv, FDR_FADER_SETTING);
+	it->fader = placed ? name_index(m, obs_data_get_string(priv, FDR_FADER_SETTING)) : -1;
+	if (it->fader < 0) {
+		const char *choice = NULL;
+		it->via = settings_track_for(m->settings, s, &choice);
+		if (it->via) {
+			it->fader = name_index(m, choice);
+		} else if (!placed) {
+			const char *pick = fdr_mixer_auto_fader(s);
+			it->fader = name_index(m, pick);
+			if (it->fader < 0 && pick && strcmp(pick, "Discord") == 0)
+				it->fader = name_index(m, "Voice");
 		}
 	}
-	obs_data_set_string(r->settings, key, cur);
 	obs_data_release(priv);
-	r->rows++;
 	return true;
+}
+
+static void build_dialog_model(struct dialog_model *m, obs_data_t *settings)
+{
+	memset(m, 0, sizeof(*m));
+	m->settings = settings;
+	m->n = fader_names(settings, m->names, FDR_MAX_FADERS);
+	obs_enum_sources(add_dialog_source, m);
+	int stream_track = stream_audio_track() ? stream_audio_track() : 1;
+	for (int t = 1; t <= 6 && m->n_items < MAX_ITEMS; t++) {
+		if (t == stream_track) // everything in the stream is on it: nothing to pick
+			continue;
+		struct dialog_item *it = &m->items[m->n_items++];
+		memset(it, 0, sizeof(*it));
+		it->track = true;
+		snprintf(it->id, sizeof(it->id), ITEM_TRACK "%d", t);
+		snprintf(it->label, sizeof(it->label), "OBS Track %d (everything ticked for it)", t);
+		char key[16];
+		snprintf(key, sizeof(key), TRACK_PREFIX "%d", t);
+		it->fader = name_index(m, obs_data_get_string(settings, key));
+	}
+}
+
+// One dropdown: `current` first (an existing row) or the "Add…" placeholder, then everything
+// that could go on this fader instead, saying where it is now.
+static void add_dialog_row(obs_properties_t *group, struct dialog_model *m, int fader, const struct dialog_item *current, bool first)
+{
+	if (n_dialog_rows >= MAX_DIALOG_ROWS)
+		return;
+	struct dialog_row *row = &dialog_rows[n_dialog_rows];
+	if (current)
+		snprintf(row->key, sizeof(row->key), ROW_PREFIX "%d", n_dialog_rows);
+	else
+		snprintf(row->key, sizeof(row->key), ADD_PREFIX "%d", fader);
+	snprintf(row->fader, sizeof(row->fader), "%s", m->names[fader]);
+	snprintf(row->item, sizeof(row->item), "%s", current ? current->id : "");
+	n_dialog_rows++;
+	// The fader's name sits on the left of its first row only.
+	obs_property_t *p = obs_properties_add_list(group, row->key, first ? m->names[fader] : " ", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	if (current)
+		obs_property_list_add_string(p, current->label, current->id);
+	else
+		obs_property_list_add_string(p, "Add a source or track…", "");
+	for (int i = 0; i < m->n_items; i++) {
+		const struct dialog_item *it = &m->items[i];
+		if (it == current || (it->fader == fader && !it->via))
+			continue;
+		char label[160];
+		if (it->via)
+			snprintf(label, sizeof(label), "%s (comes with Track %d now)", it->label, it->via);
+		else if (it->fader >= 0)
+			snprintf(label, sizeof(label), "%s (on %s now)", it->label, m->names[it->fader]);
+		else
+			snprintf(label, sizeof(label), "%s", it->label);
+		obs_property_list_add_string(p, label, it->id);
+	}
+	if (current) {
+		char label[64];
+		snprintf(label, sizeof(label), "Remove from %s", m->names[fader]);
+		obs_property_list_add_string(p, label, CHOICE_REMOVE);
+	}
+	obs_data_set_string(m->settings, row->key, row->item);
+}
+
+static void add_assignment_rows(obs_properties_t *group, obs_data_t *settings)
+{
+	static struct dialog_model m; // large: off the stack (dialog code runs on the UI thread only)
+	build_dialog_model(&m, settings);
+	n_dialog_rows = 0;
+	dialog_names[0] = 0;
+	for (int f = 0; f < m.n; f++) {
+		strncat(dialog_names, m.names[f], sizeof(dialog_names) - strlen(dialog_names) - 2);
+		strcat(dialog_names, "\n");
+		bool first = true;
+		for (int i = 0; i < m.n_items; i++) {
+			if (m.items[i].fader != f || m.items[i].via)
+				continue;
+			add_dialog_row(group, &m, f, &m.items[i], first);
+			first = false;
+		}
+		add_dialog_row(group, &m, f, NULL, first);
+	}
+	// What's left over, by name, so nothing is a mystery.
+	struct dstr rest = {0};
+	for (int i = 0; i < m.n_items; i++) {
+		if (m.items[i].track || m.items[i].fader >= 0)
+			continue;
+		dstr_cat(&rest, rest.len ? ", " : "");
+		dstr_cat(&rest, m.items[i].label);
+	}
+	struct dstr text = {0};
+	if (rest.len)
+		dstr_printf(&text, "Everything else: %s. Anything not on a fader above goes here, along with alerts and transitions.", rest.array);
+	else
+		dstr_copy(&text, "Everything else: nothing right now. Any source you don't put on a fader goes here, along with transitions.");
+	obs_property_t *info = obs_properties_add_text(group, "rest_info", text.array, OBS_TEXT_INFO);
+	obs_property_text_set_info_word_wrap(info, true);
+	dstr_free(&rest);
+	dstr_free(&text);
 }
 
 static obs_properties_t *src_properties(void *data)
@@ -451,10 +559,10 @@ static obs_properties_t *src_properties(void *data)
 	obs_properties_t *faders = obs_properties_create();
 	struct dstr cap = {0};
 	int allowance = now_st.max_stems > 0 ? now_st.max_stems : max_stems_seen;
-	struct source_rows rows = {.settings = settings};
-	rows.n = fader_names(settings, rows.names, FDR_MAX_FADERS);
-	if (rows.n > allowance)
-		dstr_printf(&cap, "Your plan includes %d faders: \"%s\" and the ones after it are folded into Everything else until you upgrade. <a href=\"" PORTAL_URL "\">Plans</a>", allowance, rows.names[allowance]);
+	char names[FDR_MAX_FADERS][FDR_STEM_NAME_MAX];
+	int n_names = fader_names(settings, names, FDR_MAX_FADERS);
+	if (n_names > allowance)
+		dstr_printf(&cap, "Your plan includes %d faders: \"%s\" and the ones after it are folded into Everything else until you upgrade. <a href=\"" PORTAL_URL "\">Plans</a>", allowance, names[allowance]);
 	else
 		dstr_printf(&cap, "Your plan includes %d faders. \"Everything else\" (alerts, transitions, anything not in a fader) is always sent too, so what viewers hear adds up to your stream.", allowance);
 	obs_property_t *capinfo = obs_properties_add_text(faders, "cap_info", cap.array, OBS_TEXT_INFO);
@@ -463,74 +571,79 @@ static obs_properties_t *src_properties(void *data)
 	obs_properties_add_editable_list(faders, S_FADERS, "Faders (one per line, in order)", OBS_EDITABLE_LIST_TYPE_STRINGS, NULL, NULL);
 	obs_properties_add_group(props, "faders_group", "Faders", OBS_GROUP_NORMAL, faders);
 
-	// ── Sources: one dropdown per audio source ────────────────────────────────────────
-	obs_properties_t *sources = obs_properties_create();
-	rows.group = sources;
-	obs_enum_sources(add_source_row, &rows);
-	if (!rows.rows)
-		obs_properties_add_text(sources, "no_sources", "No audio sources in this scene collection yet.", OBS_TEXT_INFO);
-	// OBS tracks, alongside the sources: a track given a fader sends every source ticked for it
-	// (Edit → Advanced Audio Properties) there, unless the source has its own choice above.
-	int stream_track = stream_audio_track() ? stream_audio_track() : 1;
-	for (int t = 1; t <= 6; t++) {
-		if (t == stream_track) // everything in the stream is on it: nothing to pick
-			continue;
-		char key[16], label[32];
-		snprintf(key, sizeof(key), TRACK_PREFIX "%d", t);
-		snprintf(label, sizeof(label), "OBS Track %d", t);
-		obs_property_t *p = obs_properties_add_list(sources, key, label, OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
-		obs_property_list_add_string(p, "Not used", CHOICE_NONE);
-		for (int i = 0; i < rows.n; i++)
-			obs_property_list_add_string(p, rows.names[i], rows.names[i]);
-		obs_property_list_add_string(p, "Everything else", CHOICE_REST);
-		const char *cur = obs_data_get_string(settings, key);
-		bool known = !*cur || strcmp(cur, CHOICE_NONE) == 0 || strcmp(cur, CHOICE_REST) == 0;
-		for (int i = 0; i < rows.n; i++)
-			known = known || astrcmpi(rows.names[i], cur) == 0;
-		if (!known) { // a fader that no longer exists: shown as is, mixes as Everything else
-			char gone[96];
-			snprintf(gone, sizeof(gone), "%s (no such fader: Everything else)", cur);
-			obs_property_list_add_string(p, gone, cur);
-		}
-		obs_property_set_long_description(p, "Send every source ticked for this track (Edit → Advanced Audio Properties) to one fader. A source with its own choice above keeps it.");
-	}
-	obs_properties_add_group(props, "sources_group", "Sources and tracks (which fader each one belongs to)", OBS_GROUP_NORMAL, sources);
+	// ── What goes on each fader: its sources and OBS tracks, one dropdown each ────────
+	obs_properties_t *assign = obs_properties_create();
+	add_assignment_rows(assign, settings);
+	obs_properties_add_group(props, "sources_group", "What's on each fader", OBS_GROUP_NORMAL, assign);
 	obs_properties_add_text(props, "version", "Faders plugin " FDR_VERSION_STR, OBS_TEXT_INFO);
 
 	obs_data_release(settings);
 	return props;
 }
 
-// Apply the per-source dropdown choices to the sources' private settings.
-static bool apply_source_choice(obs_data_item_t *item)
+// Put a source or track on a fader, or (fader NULL) take it off: a source then goes to Everything
+// else, a track stops being used.
+static void assign_item(obs_data_t *settings, const char *item, const char *fader)
 {
-	const char *name = obs_data_item_get_name(item);
-	if (strncmp(name, SRC_PREFIX, strlen(SRC_PREFIX)) != 0 || obs_data_item_gettype(item) != OBS_DATA_STRING)
-		return true;
-	obs_source_t *s = obs_get_source_by_uuid(name + strlen(SRC_PREFIX));
-	if (!s)
-		return true;
-	const char *choice = obs_data_item_get_string(item);
-	obs_data_t *priv = obs_source_get_private_settings(s);
-	const char *before = obs_data_has_user_value(priv, FDR_FADER_SETTING) ? obs_data_get_string(priv, FDR_FADER_SETTING) : CHOICE_AUTO;
-	const char *after = strcmp(choice, CHOICE_REST) == 0 ? "" : choice;
-	if (strcmp(before, after) != 0) {
-		if (strcmp(after, CHOICE_AUTO) == 0)
-			obs_data_erase(priv, FDR_FADER_SETTING);
-		else
-			obs_data_set_string(priv, FDR_FADER_SETTING, after);
-		blog(LOG_INFO, "[faders] \"%s\" → %s", obs_source_get_name(s), *after ? (strcmp(after, CHOICE_AUTO) == 0 ? "auto" : after) : "Everything else");
+	if (strncmp(item, ITEM_TRACK, strlen(ITEM_TRACK)) == 0) {
+		int t = atoi(item + strlen(ITEM_TRACK));
+		if (t < 1 || t > 6)
+			return;
+		char key[16];
+		snprintf(key, sizeof(key), TRACK_PREFIX "%d", t);
+		obs_data_set_string(settings, key, fader ? fader : CHOICE_NONE);
+		return;
 	}
+	if (strncmp(item, ITEM_SRC, strlen(ITEM_SRC)) != 0)
+		return;
+	obs_source_t *s = obs_get_source_by_uuid(item + strlen(ITEM_SRC));
+	if (!s)
+		return;
+	obs_data_t *priv = obs_source_get_private_settings(s);
+	obs_data_set_string(priv, FDR_FADER_SETTING, fader ? fader : "");
+	blog(LOG_INFO, "[faders] \"%s\" → %s", obs_source_get_name(s), fader ? fader : "Everything else");
 	obs_data_release(priv);
 	obs_source_release(s);
-	return true;
+}
+
+// The dropdowns the streamer changed since the dialog was built. Returns whether any did.
+static bool apply_dialog_changes(obs_data_t *settings)
+{
+	bool changed = false;
+	for (int i = 0; i < n_dialog_rows; i++) {
+		struct dialog_row *row = &dialog_rows[i];
+		if (!obs_data_has_user_value(settings, row->key))
+			continue;
+		const char *now = obs_data_get_string(settings, row->key);
+		if (strcmp(now, row->item) == 0)
+			continue;
+		changed = true;
+		if (*row->item) // an existing row: what it held leaves this fader
+			assign_item(settings, row->item, NULL);
+		if (*now && strcmp(now, CHOICE_REMOVE) != 0)
+			assign_item(settings, now, row->fader);
+	}
+	// The rows are rebuilt next; their keys mean nothing outside this dialog session.
+	for (int i = 0; i < n_dialog_rows; i++)
+		obs_data_erase(settings, dialog_rows[i].key);
+	if (changed)
+		n_dialog_rows = 0;
+	return changed;
 }
 
 static void src_update(void *data, obs_data_t *settings)
 {
 	UNUSED_PARAMETER(data);
-	for (obs_data_item_t *item = obs_data_first(settings); item; obs_data_item_next(&item))
-		apply_source_choice(item);
+	bool reassigned = apply_dialog_changes(settings);
+	// Renaming, adding or removing a fader changes the rows too.
+	char names[FDR_MAX_FADERS][FDR_STEM_NAME_MAX];
+	int n = fader_names(settings, names, FDR_MAX_FADERS);
+	char joined[sizeof(dialog_names)] = "";
+	for (int i = 0; i < n; i++) {
+		strncat(joined, names[i], sizeof(joined) - strlen(joined) - 2);
+		strcat(joined, "\n");
+	}
+	bool renamed = n_dialog_rows > 0 && strcmp(joined, dialog_names) != 0;
 	save_settings(settings);
 	// A change of names or assignments while running doesn't need a restart.
 	pthread_mutex_lock(&uplink_mu);
@@ -540,6 +653,9 @@ static void src_update(void *data, obs_data_t *settings)
 	pthread_mutex_unlock(&uplink_mu);
 	if (!live)
 		apply(settings);
+	// An open dialog redraws with the new rows (it asks for the properties again).
+	if ((reassigned || renamed) && settings_source)
+		obs_source_update_properties(settings_source);
 }
 
 static struct obs_source_info settings_source_info = {
@@ -684,6 +800,61 @@ static void proc_assign_track(void *unused, calldata_t *cd)
 	obs_data_release(s);
 }
 
+// Test hooks for the dialog, which is plain OBS properties: faders_dialog builds it exactly as the
+// window would and returns the "What's on each fader" rows, one per line, as
+//   key<TAB>label<TAB>shown choice<TAB>choice|choice|…        (an info row: key<TAB>text)
+// and faders_dialog_set changes one dropdown the way a click does.
+static void proc_dialog(void *unused, calldata_t *cd)
+{
+	UNUSED_PARAMETER(unused);
+	obs_properties_t *props = obs_source_properties(settings_source);
+	obs_data_t *settings = obs_source_get_settings(settings_source);
+	struct dstr out = {0};
+	obs_property_t *group = obs_properties_get(props, "sources_group");
+	for (obs_property_t *p = group ? obs_properties_first(obs_property_group_content(group)) : NULL; p; obs_property_next(&p)) {
+		const char *key = obs_property_name(p);
+		if (obs_property_get_type(p) != OBS_PROPERTY_LIST) {
+			dstr_catf(&out, "%s\t%s\n", key, obs_property_description(p));
+			continue;
+		}
+		const char *value = obs_data_get_string(settings, key);
+		const char *shown = "";
+		struct dstr choices = {0};
+		for (size_t i = 0; i < obs_property_list_item_count(p); i++) {
+			if (strcmp(obs_property_list_item_string(p, i), value) == 0)
+				shown = obs_property_list_item_name(p, i);
+			dstr_catf(&choices, "%s%s", i ? "|" : "", obs_property_list_item_name(p, i));
+		}
+		dstr_catf(&out, "%s\t%s\t%s\t%s\n", key, obs_property_description(p), shown, choices.array ? choices.array : "");
+		dstr_free(&choices);
+	}
+	calldata_set_string(cd, "rows", out.array ? out.array : "");
+	dstr_free(&out);
+	obs_data_release(settings);
+	obs_properties_destroy(props);
+}
+
+// value: the visible text of the choice to pick (matched from its start).
+static void proc_dialog_set(void *unused, calldata_t *cd)
+{
+	UNUSED_PARAMETER(unused);
+	const char *key = calldata_string(cd, "key"), *want = calldata_string(cd, "choice");
+	obs_properties_t *props = obs_source_properties(settings_source);
+	obs_property_t *p = obs_properties_get(props, key);
+	obs_data_t *change = NULL;
+	for (size_t i = 0; p && want && i < obs_property_list_item_count(p) && !change; i++) {
+		if (strncmp(obs_property_list_item_name(p, i), want, strlen(want)) != 0)
+			continue;
+		change = obs_data_create();
+		obs_data_set_string(change, key, obs_property_list_item_string(p, i));
+	}
+	obs_properties_destroy(props);
+	if (change)
+		obs_source_update(settings_source, change);
+	calldata_set_bool(cd, "ok", change != NULL);
+	obs_data_release(change);
+}
+
 static void proc_status(void *unused, calldata_t *cd)
 {
 	UNUSED_PARAMETER(unused);
@@ -743,6 +914,8 @@ bool obs_module_load(void)
 	proc_handler_add(ph, "void faders_assign(in string source, in string fader)", proc_assign, NULL);
 	proc_handler_add(ph, "void faders_assign_track(in int track, in string fader)", proc_assign_track, NULL);
 	proc_handler_add(ph, "void faders_status(out string status)", proc_status, NULL);
+	proc_handler_add(ph, "void faders_dialog(out string rows)", proc_dialog, NULL);
+	proc_handler_add(ph, "void faders_dialog_set(in string key, in string choice, out bool ok)", proc_dialog_set, NULL);
 	proc_handler_add(ph, "void faders_mixer_stats(out string json)", proc_mixer_stats, NULL);
 	proc_handler_add(ph, "void faders_rebuild()", proc_rebuild, NULL);
 	proc_handler_add(ph, "void faders_transition_duration(in int ms)", proc_transition_duration, NULL);

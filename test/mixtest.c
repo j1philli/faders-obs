@@ -148,6 +148,48 @@ static void assign_track(int track, const char *fader)
 	calldata_free(&cd);
 }
 
+// The settings dialog, built as the window builds it (faders_dialog): one line per row of
+// "What's on each fader", key<TAB>label<TAB>shown choice<TAB>choices.
+static char dialog_rows[32768];
+static const char *dialog(void)
+{
+	calldata_t cd = {0};
+	call("faders_dialog", &cd);
+	snprintf(dialog_rows, sizeof(dialog_rows), "%s", calldata_string(&cd, "rows") ? calldata_string(&cd, "rows") : "");
+	calldata_free(&cd);
+	return dialog_rows;
+}
+// Pick a choice in one dropdown, by its visible text, like a click.
+static bool dialog_pick(const char *key, const char *choice)
+{
+	calldata_t cd = {0};
+	calldata_set_string(&cd, "key", key);
+	calldata_set_string(&cd, "choice", choice);
+	call("faders_dialog_set", &cd);
+	bool ok = calldata_bool(&cd, "ok");
+	calldata_free(&cd);
+	return ok;
+}
+// The key of the row currently showing `shown` (from the last dialog()), or "".
+static const char *dialog_key_showing(const char *shown)
+{
+	static char key[32];
+	key[0] = 0;
+	for (const char *line = dialog_rows; *line;) {
+		const char *end = strchr(line, '\n');
+		if (!end)
+			break;
+		const char *t1 = memchr(line, '\t', (size_t)(end - line));
+		const char *t2 = t1 ? memchr(t1 + 1, '\t', (size_t)(end - t1 - 1)) : NULL;
+		if (t2 && strncmp(t2 + 1, shown, strlen(shown)) == 0 && t2[1 + strlen(shown)] == '\t') {
+			snprintf(key, sizeof(key), "%.*s", (int)(t1 - line), line);
+			return key;
+		}
+		line = end + 1;
+	}
+	return key;
+}
+
 static char stats[8192];
 static void fetch_stats(void)
 {
@@ -450,6 +492,47 @@ int main(int argc, char **argv)
 	window(800, 600);
 	result(close_to(rest_via_track, R_EXTRA, 0.03) && close_to(rest_rms(), R_EXTRA, 0.03) && close_to(fader_rms("Voice"), R_VOICE, 0.03) && close_to(fader_rms("Music"), R_MUSIC, 0.03),
 	       "6e track → Everything else, and tracks unused again", "rest via track %.4f, after %.4f (want %.4f); Voice %.4f Music %.4f", rest_via_track, rest_rms(), R_EXTRA, fader_rms("Voice"), fader_rms("Music"));
+
+	// ── 6f-6h: the settings dialog, one block per fader ─────────────────────────────────
+	// Each fader's name is the label of its first row; its sources and tracks are dropdowns under
+	// it, then an "Add…" dropdown. Nothing is called Auto.
+	const char *rows = dialog();
+	bool laid_out = strstr(rows, "\tVoice\tvoice\t") && strstr(rows, "\tGame\tgame\t") && strstr(rows, "\tMusic\tmusic\t") && strstr(rows, "\tDiscord\tdiscord\t") &&
+			strstr(rows, "add:0\t \tAdd a source or track…\t") && strstr(rows, "OBS Track 2") && !strstr(rows, "OBS Track 1") && !strstr(rows, "Auto") && strstr(rows, "rest_info\tEverything else: extra");
+	result(laid_out, "6f dialog: a block per fader, sources as dropdowns", "%s", laid_out ? "Voice/Game/Music/Discord each list their source and an Add row; extra is under Everything else; no Auto" : rows);
+	// Add a source to a fader, then take it off again, by picking in the dropdowns.
+	bool picked = dialog_pick("add:0", "extra");
+	window(800, 600);
+	double voice_plus = fader_rms("Voice"), rest_added = rest_dbfs();
+	dialog();
+	char extra_key[32];
+	snprintf(extra_key, sizeof(extra_key), "%s", dialog_key_showing("extra"));
+	bool row_shown = strncmp(extra_key, "row:", 4) == 0 && !strstr(dialog_rows, "Everything else: extra");
+	bool removed = dialog_pick(extra_key, "Remove from Voice");
+	window(800, 600);
+	result(picked && row_shown && removed && close_to(voice_plus, sqrt(R_VOICE * R_VOICE + R_EXTRA * R_EXTRA), 0.03) && rest_added < -60.0 && close_to(fader_rms("Voice"), R_VOICE, 0.03) && close_to(rest_rms(), R_EXTRA, 0.03) &&
+		       strstr(dialog(), "Everything else: extra"),
+	       "6g dialog: add a source to a fader, then remove it", "added: Voice %.4f (want %.4f), rest %.1f dBFS, row %s; removed: Voice %.4f, rest %.4f (want %.4f)", voice_plus, sqrt(R_VOICE * R_VOICE + R_EXTRA * R_EXTRA), rest_added,
+	       extra_key, fader_rms("Voice"), rest_rms(), R_EXTRA);
+	// A track goes on a fader the same way, and carries what's ticked for it, including a source
+	// that was taken off a fader; a source on a fader of its own (game) stays there.
+	obs_source_set_audio_mixers(extra, 1 | 4);
+	obs_source_set_audio_mixers(game, 1 | 4);
+	bool track_picked = dialog_pick("add:2", "OBS Track 3");
+	window(800, 600);
+	double music_track = fader_rms("Music"), game_track = fader_rms("Game"), rest_track = rest_dbfs();
+	dialog();
+	char track_key[32];
+	snprintf(track_key, sizeof(track_key), "%s", dialog_key_showing("OBS Track 3 (everything ticked for it)"));
+	bool track_row = strncmp(track_key, "row:", 4) == 0 && strstr(dialog_rows, "extra (comes with Track 3 now)");
+	bool track_removed = dialog_pick(track_key, "Remove from Music");
+	obs_source_set_audio_mixers(extra, 1);
+	obs_source_set_audio_mixers(game, 1);
+	window(800, 600);
+	result(track_picked && track_row && track_removed && close_to(music_track, music_with_extra, 0.03) && close_to(game_track, R_GAME, 0.03) && rest_track < -60.0 && close_to(fader_rms("Music"), R_MUSIC, 0.03) &&
+		       close_to(rest_rms(), R_EXTRA, 0.03),
+	       "6h dialog: a track on a fader, then removed", "track on Music: Music %.4f (want %.4f), Game %.4f, rest %.1f dBFS, row %s; removed: Music %.4f, rest %.4f", music_track, music_with_extra, game_track, rest_track, track_key,
+	       fader_rms("Music"), rest_rms());
 
 	// From here the residual should be ~0: put the extra tone in a fader.
 	assign("extra", "Discord");

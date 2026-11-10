@@ -551,17 +551,19 @@ static int deciding_track(struct fdr_mixer *m, obs_source_t *src)
 	return -1;
 }
 
-// Locked. The fader index for a source: its private setting, else the fader of an assigned track
-// it is ticked for, else the rule table (with the table's fallbacks when that fader doesn't
-// exist); folded faders → REST.
+// Locked. The fader index for a source: the fader it was put on by name; else the fader of an
+// assigned track it is ticked for (a track carries everything ticked for it that isn't on a fader
+// of its own, including sources taken off a fader); else Everything else if it was taken off, or
+// the rule table's starting guess (with the table's fallbacks when that fader doesn't exist).
+// Folded faders → REST.
 static int resolve_fader(struct fdr_mixer *m, obs_source_t *src, bool *is_auto)
 {
 	obs_data_t *priv = obs_source_get_private_settings(src);
-	int idx = -1;
 	bool automatic = !obs_data_has_user_value(priv, FDR_FADER_SETTING);
-	int track = automatic ? deciding_track(m, src) : -1;
-	if (!automatic) {
-		idx = fader_index(m, obs_data_get_string(priv, FDR_FADER_SETTING));
+	int idx = automatic ? -1 : fader_index(m, obs_data_get_string(priv, FDR_FADER_SETTING));
+	int track = idx < 0 ? deciding_track(m, src) : -1;
+	if (idx >= 0 || (!automatic && track < 0)) {
+		// on a fader of its own, or taken off with no track to carry it
 	} else if (track >= 0) {
 		idx = fader_index(m, m->track_fader[track]); // "" or an unknown name: Everything else
 	} else {
@@ -955,11 +957,11 @@ int fdr_mixer_track_for(fdr_mixer_t *m, obs_source_t *src)
 	if (!m || !src)
 		return 0;
 	obs_data_t *priv = obs_source_get_private_settings(src);
-	bool automatic = !obs_data_has_user_value(priv, FDR_FADER_SETTING);
-	obs_data_release(priv);
 	pthread_mutex_lock(&m->mu);
-	int t = automatic ? deciding_track(m, src) : -1;
+	bool own = obs_data_has_user_value(priv, FDR_FADER_SETTING) && fader_index(m, obs_data_get_string(priv, FDR_FADER_SETTING)) >= 0;
+	int t = own ? -1 : deciding_track(m, src);
 	pthread_mutex_unlock(&m->mu);
+	obs_data_release(priv);
 	return t + 1;
 }
 

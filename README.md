@@ -13,12 +13,16 @@ transitions). Your Twitch stream is not touched.
 
 - **Tools → Faders** opens the settings (OBS's own properties window, no custom UI code):
   key (with a link to the portal to get one), the **Faders** list (names, in order; "Your plan
-  includes N faders"), **Sources and tracks** (one dropdown per audio source: a fader, "Everything else", or
-  "Auto (→ X)" from the rule table in `PROTOCOL.md`; then one per OBS track except the streamed
-  one: "Not used", a fader, or "Everything else") and "Only send while streaming". A track
-  given a fader is an assignment rule, not a second audio path: every source ticked for it and
-  left on Auto resolves to that fader (lowest assigned track first), so each source is still in
-  exactly one fader and the mix stays exact. `faders_assign_track(track, fader)` scripts it. The
+  includes N faders"), **What's on each fader** (a block per fader, its name on the left: one dropdown per
+  source or OBS track on it, then "Add a source or track…"; a dropdown's "Remove from …" sends a
+  source to Everything else, which is listed by name underneath) and "Only send while
+  streaming". There is no "Auto": sources the rule table in `PROTOCOL.md` recognises start on
+  their fader and show as ordinary rows. A track on a fader is an assignment rule, not a second
+  audio path: every source ticked for it that isn't on a fader of its own resolves to that fader
+  (lowest such track first), so each source is still in exactly one fader and the mix stays
+  exact. The dialog asks OBS to redraw after each change (`obs_source_update_properties`).
+  Scripting: `faders_assign`, `faders_assign_track`; tests drive the real properties with
+  `faders_dialog` / `faders_dialog_set`. The
   server is `wss://hub.faders.tv/ingest` (the key identifies the channel); tests point it
   elsewhere with the `faders_configure` procedure.
 - **The virtual mixer** (`src/mixer.c`): no OBS tracks are used. The plugin mixes each fader

@@ -46,9 +46,9 @@ void fdr_mixer_set_transition_duration(fdr_mixer_t *m, int duration_ms);
 // allowance: faders past max_stems are folded into Everything else, never dropped.
 void fdr_mixer_set_faders(fdr_mixer_t *m, const char *const *names, int n, int max_stems);
 // OBS tracks as fader inputs: faders[t] is the fader for Track t+1 (a name, "" for Everything
-// else, NULL = the track isn't used). A source with no assignment of its own goes to the fader of
-// the lowest-numbered assigned track it is ticked for (the streamed track is never one); only then
-// do the automatic rules apply. Each source still lands in exactly one fader, so the mix stays
+// else, NULL = the track isn't used). A source that isn't on a fader of its own goes to the fader
+// of the lowest-numbered assigned track it is ticked for (the streamed track is never one); only
+// then does the starting guess apply. Each source still lands in exactly one fader, so the mix stays
 // exact. Ticking or unticking a track in OBS is followed within a moment.
 void fdr_mixer_set_track_faders(fdr_mixer_t *m, const char *const faders[6]);
 // Re-read the sources and their assignments (after a change the mixer didn't see itself).
