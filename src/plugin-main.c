@@ -333,6 +333,7 @@ struct dialog_item {
 	char label[96];
 	int fader;   // index into the names it has a row under, or -1: none (a track: not used)
 	int via;     // a source with no row that an assigned track (1-6) brings to a fader, else 0
+	uint32_t mixers; // a source: the OBS tracks it is ticked for
 	bool track;
 };
 
@@ -371,6 +372,7 @@ static bool add_dialog_source(void *param, obs_source_t *s)
 	memset(it, 0, sizeof(*it));
 	snprintf(it->id, sizeof(it->id), ITEM_SRC "%s", obs_source_get_uuid(s));
 	snprintf(it->label, sizeof(it->label), "%s", obs_source_get_name(s));
+	it->mixers = obs_source_get_audio_mixers(s);
 	// Its own row: the fader the streamer put it on, or the plugin's starting guess from the kind
 	// of source. Tracks don't change that; they add to it.
 	obs_data_t *priv = obs_source_get_private_settings(s);
@@ -447,10 +449,51 @@ static void add_dialog_row(obs_properties_t *group, struct dialog_model *m, int 
 	obs_data_set_string(m->settings, row->key, row->item);
 }
 
+// Sources that are on more than one fader (their own, and one a track they're ticked for is on),
+// one sentence each: which source, which faders. Empty when there are none.
+static void duplicate_warning(const struct dialog_model *m, struct dstr *out)
+{
+	for (int i = 0; i < m->n_items; i++) {
+		const struct dialog_item *src = &m->items[i];
+		if (src->track)
+			continue;
+		struct dstr where = {0};
+		uint32_t seen = 0;
+		int count = 0;
+		if (src->fader >= 0) {
+			seen |= 1u << src->fader;
+			count++;
+			dstr_cat(&where, m->names[src->fader]);
+		}
+		for (int k = 0; k < m->n_items; k++) {
+			const struct dialog_item *tr = &m->items[k];
+			int t = tr->track ? atoi(tr->id + strlen(ITEM_TRACK)) : 0;
+			if (!t || tr->fader < 0 || !(src->mixers & (1u << (t - 1))) || (seen & (1u << tr->fader)))
+				continue;
+			seen |= 1u << tr->fader;
+			dstr_catf(&where, "%s%s (with Track %d)", count ? ", " : "", m->names[tr->fader], t);
+			count++;
+		}
+		if (count > 1)
+			dstr_catf(out, "%s\"%s\" is on %d faders: %s.", out->len ? " " : "", src->label, count, where.array);
+		dstr_free(&where);
+	}
+	if (out->len)
+		dstr_cat(out, " Viewers hear a source once for each fader it's on, so these are louder for them than in your stream. To fix it, untick the source for that track in Edit → Advanced Audio Properties, or remove it from its own fader.");
+}
+
 static void add_assignment_rows(obs_properties_t *group, obs_data_t *settings)
 {
 	static struct dialog_model m; // large: off the stack (dialog code runs on the UI thread only)
 	build_dialog_model(&m, settings);
+	struct dstr dup = {0};
+	duplicate_warning(&m, &dup);
+	if (dup.len) {
+		obs_property_t *w = obs_properties_add_text(group, "dup_warning", dup.array, OBS_TEXT_INFO);
+		obs_property_text_set_info_type(w, OBS_TEXT_INFO_WARNING);
+		obs_property_text_set_info_word_wrap(w, true);
+	}
+	dstr_free(&dup);
 	n_dialog_rows = 0;
 	dialog_names[0] = 0;
 	for (int f = 0; f < m.n; f++) {

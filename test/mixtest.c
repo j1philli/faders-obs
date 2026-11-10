@@ -532,14 +532,24 @@ int main(int argc, char **argv)
 		snprintf(game_choices, sizeof(game_choices), "%.*s", (int)strcspn(add_game, "\n"), add_game);
 	bool track_row = strncmp(track_key, "row:", 4) == 0 && strstr(game_choices, "|extra") && !strstr(game_choices, "now)") && !strstr(game_choices, "|voice") && !strstr(game_choices, "OBS Track 3") &&
 			 strstr(game_choices, "OBS Track 2");
+	// The dialog says which source is doubled and where: game (Game, and Music with Track 3). Not
+	// extra, which is only on Music. The warning goes when the track does.
+	const char *warn = strstr(dialog_rows, "dup_warning\t");
+	char warning[1024] = "";
+	if (warn)
+		snprintf(warning, sizeof(warning), "%.*s", (int)strcspn(warn, "\n"), warn);
+	bool warned = strstr(warning, "\"game\" is on 2 faders: Game, Music (with Track 3).") && !strstr(warning, "\"extra\"") && !strstr(warning, "\"voice\"");
 	bool track_removed = dialog_pick(track_key, "Remove from Music");
+	warned = warned && !strstr(dialog(), "dup_warning");
 	obs_source_set_audio_mixers(extra, 1);
 	obs_source_set_audio_mixers(game, 1);
 	window(800, 600);
-	result(track_picked && track_row && track_removed && close_to(music_track, music_with_track, 0.03) && close_to(game_track, R_GAME, 0.03) && rest_track < -60.0 && close_to(fader_rms("Music"), R_MUSIC, 0.03) &&
+	result(track_picked && track_row && track_removed && warned && close_to(music_track, music_with_track, 0.03) && close_to(game_track, R_GAME, 0.03) && rest_track < -60.0 && close_to(fader_rms("Music"), R_MUSIC, 0.03) &&
 		       close_to(rest_rms(), R_EXTRA, 0.03),
-	       "6h dialog: a track on a fader, then removed", "track on Music: Music %.4f (want %.4f), Game %.4f, rest %.1f dBFS, row %s; removed: Music %.4f, rest %.4f", music_track, music_with_track, game_track, rest_track, track_key,
+	       "6h dialog: a track on a fader warns of doubles", "warning %s; track on Music: Music %.4f (want %.4f), Game %.4f, rest %.1f dBFS, row %s; removed: Music %.4f, rest %.4f", warned ? "names game, Game and Music (with Track 3)" : "WRONG", music_track, music_with_track, game_track, rest_track, track_key,
 	       fader_rms("Music"), rest_rms());
+	if (!warned)
+		printf("      warning row was: %s\n", warning);
 
 	// From here the residual should be ~0: put the extra tone in a fader.
 	assign("extra", "Discord");

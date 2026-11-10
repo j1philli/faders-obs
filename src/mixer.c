@@ -232,6 +232,10 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 	for (int k = 0; k < n; k++) {
 		struct entry *e = &snap->e[k];
 		inc[k] = false;
+		// Every path that skips this entry must leave no stale "held back" mark or pointers from
+		// an earlier tick (the entries behind an index change when sources come and go).
+		side[k] = -1;
+		contrib[k][0] = contrib[k][1] = NULL;
 		obs_source_t *s = obs_weak_source_get_source(e->weak);
 		if (!s)
 			continue;
