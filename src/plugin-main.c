@@ -413,8 +413,9 @@ static void build_dialog_model(struct dialog_model *m, obs_data_t *settings)
 	}
 }
 
-// One dropdown: `current` first (an existing row) or the "Add…" placeholder, then everything
-// that could go on this fader instead, saying where it is now.
+// One dropdown. An existing row shows what it holds and offers to remove it. The "Add…" row
+// offers only what isn't on a fader yet: a source with a row of its own, or a track on a fader,
+// is not in anyone else's list (to move one, remove it first).
 static void add_dialog_row(obs_properties_t *group, struct dialog_model *m, int fader, const struct dialog_item *current, bool first)
 {
 	if (n_dialog_rows >= MAX_DIALOG_ROWS)
@@ -433,18 +434,11 @@ static void add_dialog_row(obs_properties_t *group, struct dialog_model *m, int 
 		obs_property_list_add_string(p, current->label, current->id);
 	else
 		obs_property_list_add_string(p, "Add a source or track…", "");
-	for (int i = 0; i < m->n_items; i++) {
+	for (int i = 0; !current && i < m->n_items; i++) {
 		const struct dialog_item *it = &m->items[i];
-		if (it == current || (it->fader == fader && !it->via))
+		if (it->fader >= 0 && !it->via) // already on a fader
 			continue;
-		char label[160];
-		if (it->via)
-			snprintf(label, sizeof(label), "%s (comes with Track %d now)", it->label, it->via);
-		else if (it->fader >= 0)
-			snprintf(label, sizeof(label), "%s (on %s now)", it->label, m->names[it->fader]);
-		else
-			snprintf(label, sizeof(label), "%s", it->label);
-		obs_property_list_add_string(p, label, it->id);
+		obs_property_list_add_string(p, it->label, it->id);
 	}
 	if (current) {
 		char label[64];
@@ -472,7 +466,8 @@ static void add_assignment_rows(obs_properties_t *group, obs_data_t *settings)
 		}
 		add_dialog_row(group, &m, f, NULL, first);
 	}
-	// What's left over, by name, so nothing is a mystery.
+	// What's left over, by name, so nothing is a mystery (a source a track brings to a fader
+	// isn't left over).
 	struct dstr rest = {0};
 	for (int i = 0; i < m.n_items; i++) {
 		if (m.items[i].track || m.items[i].fader >= 0)

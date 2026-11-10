@@ -14,8 +14,9 @@ transitions). Your Twitch stream is not touched.
 - **Tools → Faders** opens the settings (OBS's own properties window, no custom UI code):
   key (with a link to the portal to get one), the **Faders** list (names, in order; "Your plan
   includes N faders"), **What's on each fader** (a block per fader, its name on the left: one dropdown per
-  source or OBS track on it, then "Add a source or track…"; a dropdown's "Remove from …" sends a
-  source to Everything else, which is listed by name underneath) and "Only send while
+  source or OBS track on it, then "Add a source or track…", which offers only what isn't on a
+  fader yet; a row's "Remove from …" sends a source to Everything else, which is listed by name
+  underneath) and "Only send while
   streaming". There is no "Auto": sources the rule table in `PROTOCOL.md` recognises start on
   their fader and show as ordinary rows. A track on a fader is an assignment rule, not a second
   audio path: every source ticked for it that isn't on a fader of its own resolves to that fader

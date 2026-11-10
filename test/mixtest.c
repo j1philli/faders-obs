@@ -524,7 +524,14 @@ int main(int argc, char **argv)
 	dialog();
 	char track_key[32];
 	snprintf(track_key, sizeof(track_key), "%s", dialog_key_showing("OBS Track 3 (everything ticked for it)"));
-	bool track_row = strncmp(track_key, "row:", 4) == 0 && strstr(dialog_rows, "extra (comes with Track 3 now)");
+	// Nothing clever in the lists: "extra" is still offered as itself, a source that's on a fader
+	// (voice) is offered nowhere else, and a track on a fader leaves the other Add lists.
+	const char *add_game = strstr(dialog_rows, "add:1\t");
+	char game_choices[2048] = "";
+	if (add_game)
+		snprintf(game_choices, sizeof(game_choices), "%.*s", (int)strcspn(add_game, "\n"), add_game);
+	bool track_row = strncmp(track_key, "row:", 4) == 0 && strstr(game_choices, "|extra") && !strstr(game_choices, "now)") && !strstr(game_choices, "|voice") && !strstr(game_choices, "OBS Track 3") &&
+			 strstr(game_choices, "OBS Track 2");
 	bool track_removed = dialog_pick(track_key, "Remove from Music");
 	obs_source_set_audio_mixers(extra, 1);
 	obs_source_set_audio_mixers(game, 1);
