@@ -16,7 +16,7 @@
 // Main thread: fader names (settings), source discovery and assignment (per-source private
 // setting "faders_fader"), transition bookkeeping. Audio thread: one raw callback on the
 // streamed track per tick, gating + summing per-source buffers (obs_source_get_audio_mix) into
-// the faders, the residual, an oracle that drops a source whose audio shows up in the residual,
+// the faders, the residual, an oracle that drops a source the stream lacks and warns about one the stream has twice,
 // and a push of every stem to the uplink.
 #pragma once
 #include <obs.h>

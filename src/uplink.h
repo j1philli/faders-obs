@@ -39,6 +39,7 @@ typedef struct fdr_uplink_status {
 	int stems;                 // layers on the wire (the faders plus "Everything else")
 	int max_stems;             // layers the channel's plan allows (from the hub); 0 = not told
 	char mix_mismatch[64];     // a source sent to Faders but missing from the stream; "" = fine
+	char mix_duplicate[64];    // a source in the stream more than once (its fader carries one copy); "" = fine
 
 } fdr_uplink_status;
 
@@ -59,4 +60,6 @@ void fdr_uplink_watch_stream_track(fdr_uplink_t *u, int track);
 void fdr_uplink_set_stems(fdr_uplink_t *u, const char *const *names, int n, bool rest);
 void fdr_uplink_push_tick(fdr_uplink_t *u, uint64_t ts, const float *const *stems, int n, size_t frames, float track_peak);
 void fdr_uplink_set_mismatch(fdr_uplink_t *u, const char *source_name);
+// A source the oracle found in the stream more than once: shown in OBS, not sent to the hub.
+void fdr_uplink_set_duplicate(fdr_uplink_t *u, const char *source_name);
 int fdr_uplink_max_stems(fdr_uplink_t *u);

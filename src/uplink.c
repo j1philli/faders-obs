@@ -634,6 +634,15 @@ void fdr_uplink_set_mismatch(fdr_uplink_t *u, const char *source_name)
 	pthread_mutex_unlock(&u->mu);
 }
 
+void fdr_uplink_set_duplicate(fdr_uplink_t *u, const char *source_name)
+{
+	if (!u)
+		return;
+	pthread_mutex_lock(&u->mu);
+	snprintf(u->status.mix_duplicate, sizeof(u->status.mix_duplicate), "%s", source_name ? source_name : "");
+	pthread_mutex_unlock(&u->mu);
+}
+
 int fdr_uplink_max_stems(fdr_uplink_t *u)
 {
 	if (!u)
@@ -691,6 +700,7 @@ void fdr_uplink_watch_stream_track(fdr_uplink_t *u, int track)
 		u->status.stream_track = 0;
 		u->status.stream_track_silent = false;
 		u->status.mix_mismatch[0] = 0;
+		u->status.mix_duplicate[0] = 0;
 		pthread_mutex_unlock(&u->mu);
 	}
 	if (track < 1 || track > 6)

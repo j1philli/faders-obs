@@ -325,6 +325,8 @@ static void status_text(struct dstr *out)
 		dstr_printf(out, "Connected, but Track %d (what OBS streams) is silent: viewers hear nothing.", st.stream_track);
 	else if (st.mix_mismatch[0])
 		dstr_printf(out, "Connected. \"%s\" isn't in your stream the way Faders sends it: moved to Everything else.", st.mix_mismatch);
+	else if (st.mix_duplicate[0])
+		dstr_printf(out, "Connected. \"%s\" is in your stream more than once: its fader only controls one copy.", st.mix_duplicate);
 	else if (st.listeners == 0)
 		dstr_printf(out, "Connected. Paused until a viewer turns Faders on. %d layers%s.", st.stems, st.stream_track ? "; Faders mix matches your stream" : "");
 	else
@@ -612,6 +614,18 @@ static obs_properties_t *src_properties(void *data)
 			    "restart the stream or the plugin. <a href=\"" DOCS_URL "\">How to assign sources</a>",
 			    now_st.mix_mismatch, now_st.stream_track);
 		obs_property_t *w = obs_properties_add_text(props, "mix_mismatch", warn.array, OBS_TEXT_INFO);
+		obs_property_text_set_info_type(w, OBS_TEXT_INFO_WARNING);
+		obs_property_text_set_info_word_wrap(w, true);
+		dstr_free(&warn);
+	}
+	if (now_st.mix_duplicate[0]) {
+		struct dstr warn = {0};
+		dstr_printf(&warn,
+			    "\"%s\" is in your stream more than once: it is captured twice (for example by Desktop Audio as "
+			    "well), or another source plays the same audio. Its fader only controls one copy; the other is in "
+			    "Everything else. Nothing has been moved.",
+			    now_st.mix_duplicate);
+		obs_property_t *w = obs_properties_add_text(props, "mix_duplicate", warn.array, OBS_TEXT_INFO);
 		obs_property_text_set_info_type(w, OBS_TEXT_INFO_WARNING);
 		obs_property_text_set_info_word_wrap(w, true);
 		dstr_free(&warn);

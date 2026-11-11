@@ -32,6 +32,7 @@
 #define ORACLE_TICKS 24
 #define ORACLE_R 0.5
 #define ORACLE_RUNS 3
+#define ORACLE_CALM 6 // windows without it before a duplicate warning is withdrawn
 #define ORACLE_MIN_ENERGY 1e-6 // Σ x² over a window below this is no evidence
 #define MAX_CB 2048
 #define MAX_TREE 128
@@ -46,6 +47,7 @@ struct entry {
 	// Oracle sums for the current window (audio thread).
 	double xy, xx;
 	int run;
+	int calm; // windows in a row without the correlation, once warned about as a duplicate
 	bool dropped;
 };
 
@@ -105,6 +107,7 @@ struct fdr_mixer {
 	obs_weak_source_t *dropped[MAX_ENTRIES];
 	int n_dropped;
 	char mismatch[64];
+	char duplicate[64]; // a source whose audio is in the stream more than its fader carries; warned, not moved
 	struct ats_slot ats[MAX_ENTRIES * 2];
 	struct stats st;
 
@@ -419,29 +422,50 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 	yy += rest_sq;
 	if (++oracle_ticks >= ORACLE_TICKS) {
 		oracle_ticks = 0;
-		const char *drop = NULL;
+		// r < 0: the stream lacks audio the fader carries (the source isn't in the stream the way
+		// it was included), so it is moved to Everything else. r > 0: the stream has more of this
+		// audio than the fader carries (captured twice, or another source plays the same sound).
+		// Nothing is wrong with the fader then, so the source stays and the streamer is warned.
+		const char *drop = NULL, *dup = NULL;
+		bool dup_gone = false;
 		for (int k = 0; k < n; k++) {
 			struct entry *e = &snap->e[k];
 			bool evaluable = e->fader != REST && e->xx > ORACLE_MIN_ENERGY && yy > ORACLE_MIN_ENERGY;
 			if (evaluable) {
 				double r = e->xy / sqrt(e->xx * yy);
 				e->run = fabs(r) > ORACLE_R ? e->run + 1 : 0;
-				if (e->run >= ORACLE_RUNS && !drop && m->n_dropped < MAX_ENTRIES) {
+				if (e->run >= ORACLE_RUNS && r < 0 && !drop && m->n_dropped < MAX_ENTRIES) {
 					drop = e->name;
 					e->fader = REST;
 					e->extra = 0;
 					e->dropped = true;
 					obs_weak_source_addref(e->weak);
 					m->dropped[m->n_dropped++] = e->weak;
+				} else if (e->run >= ORACLE_RUNS && r > 0 && !dup && !m->duplicate[0]) {
+					dup = e->name;
 				}
+			}
+			// The warned source is playing and the stream no longer has more of it.
+			if (m->duplicate[0] && e->fader != REST && e->xx > ORACLE_MIN_ENERGY && strcmp(m->duplicate, e->name) == 0) {
+				e->calm = evaluable && e->run ? 0 : e->calm + 1;
+				dup_gone = e->calm >= ORACLE_CALM;
 			}
 			e->xy = e->xx = 0;
 		}
 		yy = 0;
 		if (drop) {
 			snprintf(m->mismatch, sizeof(m->mismatch), "%s", drop);
-			blog(LOG_WARNING, "[faders] \"%s\" is sent to Faders but is not in your stream (Track %d) the same way: moved to Everything else for this session. Check the source's track and that it isn't captured twice.", drop, m->stream_track);
+			blog(LOG_WARNING, "[faders] \"%s\" is sent to Faders but is not in your stream (Track %d) the same way: moved to Everything else for this session. Check the source's track and that it isn't monitor-only.", drop, m->stream_track);
 			fdr_uplink_set_mismatch(m->uplink, drop);
+		}
+		if (dup) {
+			snprintf(m->duplicate, sizeof(m->duplicate), "%s", dup);
+			blog(LOG_WARNING, "[faders] \"%s\" is in your stream (Track %d) more than once: it is captured twice, or another source plays the same audio. Its fader only controls one copy; the other is in Everything else.", dup, m->stream_track);
+			fdr_uplink_set_duplicate(m->uplink, dup);
+		} else if (dup_gone) {
+			blog(LOG_INFO, "[faders] \"%s\" is no longer in your stream more than once", m->duplicate);
+			m->duplicate[0] = 0;
+			fdr_uplink_set_duplicate(m->uplink, NULL);
 		}
 	}
 
@@ -1080,7 +1104,7 @@ void fdr_mixer_stats_json(fdr_mixer_t *m, struct dstr *out)
 		p99 = st.cb_ns[(int)(0.99 * (st.n_cb - 1))] / 1000.0;
 		mx = st.cb_ns[st.n_cb - 1] / 1000.0;
 	}
-	dstr_catf(out, "],\"cb_us\":{\"p50\":%.1f,\"p99\":%.1f,\"max\":%.1f,\"n\":%d},\"mismatch\":\"%s\",\"fading\":%s}", p50, p99, mx, st.n_cb, m->mismatch, m->fade.active ? "true" : "false");
+	dstr_catf(out, "],\"cb_us\":{\"p50\":%.1f,\"p99\":%.1f,\"max\":%.1f,\"n\":%d},\"mismatch\":\"%s\",\"duplicate\":\"%s\",\"fading\":%s}", p50, p99, mx, st.n_cb, m->mismatch, m->duplicate, m->fade.active ? "true" : "false");
 	memset(&m->st, 0, sizeof(m->st));
 	pthread_mutex_unlock(&m->mu);
 }

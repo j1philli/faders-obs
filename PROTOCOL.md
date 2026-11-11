@@ -41,10 +41,13 @@ in a fader it is silent and costs nothing on the wire (`nFrames = 0`). The sum o
 the streamed track, sample for sample.
 
 The residual is also an oracle: per window, the plugin correlates it with every included source.
-|r| > 0.5 three windows in a row means that source's audio is in the residual, i.e. it is sent to
-Faders but is not in the streamed track the same way (muted or off the track for Twitch, captured
-twice, monitor-only). The plugin moves it to Everything else for the session, logs it, shows it in
-Tools → Faders, and reports it in the `status` message (`mixMismatch`).
+|r| > 0.5 three windows in a row means that source's audio is in the residual. Negative: the
+streamed track lacks audio the fader carries (muted or off the track for Twitch, monitor-only).
+The plugin moves the source to Everything else for the session, logs it, shows it in Tools →
+Faders, and reports it in the `status` message (`mixMismatch`). Positive: the stream has more of
+that audio than the fader carries (captured twice, or another source plays the same sound). The
+fader is right as it is, so nothing moves: the plugin logs it and warns in Tools → Faders until
+the source has played without it for 3 s. That warning is not sent to the hub.
 
 ## Virtual mixer: libobs facts (verified with `faders-mixcheck` against libobs 32.2.2)
 
@@ -134,9 +137,11 @@ events; the audio thread takes a strong reference per source per tick):
    "" = Everything else; faders past the plan's `maxStems` fold into Everything else).
 4. Everything else = unclamped track − Σ faders. Σ(all stems) == the streamed track exactly.
 5. Oracle: per ~0.5 s window, the residual correlated with each included source's
-   contribution; |r| > 0.5 three windows in a row means the source isn't in the stream the
-   way it was included (gating bug, double capture…): it is moved to Everything else for the
+   contribution; |r| > 0.5 three windows in a row. r < 0: the source isn't in the stream the
+   way it was included (gating bug, off the track…): it is moved to Everything else for the
    session, logged, shown in Tools → Faders and reported as `mixMismatch` with the source name.
+   r > 0: the stream has that audio more than once (double capture, a second source with the
+   same sound): a warning in the log and in Tools → Faders, nothing moved.
 
 Measured (test/mixtest.c, CI target `faders-mixtest`, libobs 32.2.2, Apple M3 Pro): every
 fader exact and Everything else == the unassigned source (±3 %); mute and a 200 ms push-to-talk
@@ -144,7 +149,7 @@ release land on the tick; hidden / preview-only / Monitor Only / off-track sourc
 nothing leaking; 300 ms fade residual −72 dBFS during the fade (−154 after); sync offset +200 ms
 aligned; a duplicated source counted once; two dozen sources p50 42–52 µs, p99 230–320 µs per 21 ms tick;
 plan cap folds faders (hub `maxStems` 2 → 2 + Everything else on the wire); an injected
-mismatch dropped after 1.3 s.
+mismatch dropped after 1.3 s; the same audio from a second source warned about and left on its fader.
 
 Rule table for automatic assignment (first match; a fader that isn't configured falls back as
 noted): mic inputs (`wasapi_input_capture`, `coreaudio_input_capture`, `pulse_input_capture`,

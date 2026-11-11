@@ -40,6 +40,7 @@
 struct tone {
 	obs_source_t *source;
 	double freq, amp, phase;
+	bool clock; // phase taken from the clock: two such tones of one frequency are the same audio
 	pthread_t thread;
 	volatile bool stop;
 };
@@ -50,6 +51,8 @@ static void *tone_thread(void *param)
 	const size_t block = RATE / 100;
 	float l[RATE / 100], r[RATE / 100];
 	uint64_t t0 = os_gettime_ns();
+	if (t->clock)
+		t->phase = fmod(2.0 * M_PI * t->freq * (double)(t0 % 1000000000ULL) / 1e9, 2.0 * M_PI);
 	for (uint64_t n = 0; !t->stop; n++) {
 		for (size_t i = 0; i < block; i++) {
 			float v = (float)(t->amp * sin(t->phase));
@@ -79,6 +82,7 @@ static void *tone_create(obs_data_t *settings, obs_source_t *source)
 	t->source = source;
 	t->freq = obs_data_get_double(settings, "freq");
 	t->amp = obs_data_get_double(settings, "amp");
+	t->clock = obs_data_get_bool(settings, "clock");
 	pthread_create(&t->thread, NULL, tone_thread, t);
 	return t;
 }
@@ -230,6 +234,12 @@ static bool source_dropped(const char *name)
 {
 	const char *p = source_json(name);
 	return p && strstr(p, "\"dropped\":true") && (strstr(p, "\"dropped\":true") < strchr(p + 1, '}'));
+}
+static bool duplicate_is(const char *name)
+{
+	char want[96];
+	snprintf(want, sizeof(want), "\"duplicate\":\"%s\"", name);
+	return strstr(stats, want) != NULL;
 }
 static const char *mismatch(void)
 {
@@ -664,6 +674,37 @@ int main(int argc, char **argv)
 	// audio thread; the tail is scheduling noise on a shared CI machine).
 	result(p50 < 100.0 && p99 < 500.0 && rest_dbfs() < -60.0, "10 CPU: two dozen sources, per-tick work", "p50 %.0f µs, p99 %.0f µs, max %.0f µs; rest %.1f dBFS", p50, p99, mx, rest_dbfs());
 
+	// ── 11: the same audio from a second source: a warning, nothing moved ───────────────
+	// Two sources playing identical audio, one on a fader and one unassigned (a capture of the
+	// same app twice, Desktop Audio picking up a source). The stream has more of that audio than
+	// the fader carries; the fader is still right, so the source stays on it.
+	obs_source_t *twin_a = NULL, *twin_b = NULL;
+	{
+		obs_data_t *ts = obs_data_create();
+		obs_data_set_double(ts, "freq", 1000); // whole cycles per second: the clock's second boundary doesn't matter
+		obs_data_set_double(ts, "amp", 0.2);
+		obs_data_set_bool(ts, "clock", true);
+		twin_a = obs_source_create("faders_test_tone", "twin-a", ts, NULL);
+		twin_b = obs_source_create("faders_test_tone", "twin-b", ts, NULL);
+		obs_data_release(ts);
+	}
+	obs_source_set_audio_mixers(twin_a, 1);
+	obs_source_set_audio_mixers(twin_b, 1);
+	assign("twin-a", "Voice");
+	obs_sceneitem_t *twin_a_item = obs_scene_add(many, twin_a), *twin_b_item = obs_scene_add(many, twin_b);
+	window(2500, 800);
+	double voice_twin = sqrt(R_VOICE * R_VOICE + TONE_RMS(0.2) * TONE_RMS(0.2));
+	result(duplicate_is("twin-a") && !source_dropped("twin-a") && mismatch()[0] == 0 && close_to(fader_rms("Voice"), voice_twin, 0.03) && close_to(rest_rms(), TONE_RMS(0.2), 0.05),
+	       "11 same audio from two sources: warned, not moved", "duplicate twin-a %d, dropped %d, mismatch \"%s\", Voice %.4f (want %.4f), rest %.4f (want %.4f: the other copy)", duplicate_is("twin-a"),
+	       source_dropped("twin-a"), mismatch(), fader_rms("Voice"), voice_twin, rest_rms(), TONE_RMS(0.2));
+	obs_sceneitem_remove(twin_b_item);
+	window(4500, 600);
+	result(duplicate_is("") && !source_dropped("twin-a") && close_to(fader_rms("Voice"), voice_twin, 0.03) && rest_dbfs() < -60.0, "11b warning withdrawn once the other copy is gone",
+	       "duplicate cleared %d, Voice %.4f (want %.4f), rest %.1f dBFS", duplicate_is(""), fader_rms("Voice"), voice_twin, rest_dbfs());
+	obs_sceneitem_remove(twin_a_item);
+	assign("twin-a", "");
+	os_sleep_ms(800);
+
 	// ── 12: mismatch injection: a source included although it isn't in the stream ─────
 	// On track 1 but in no scene/output: its buffers carry audio every tick (libobs ticks
 	// inactive sources) while the streamed track has none of it. The test hook bypasses the
@@ -707,6 +748,8 @@ teardown:
 		obs_source_release(prev);
 		obs_source_release(dup);
 		obs_source_release(inj);
+		obs_source_release(twin_a);
+		obs_source_release(twin_b);
 		for (int i = 0; i < 12; i++)
 			obs_source_release(extra12[i]);
 	}
