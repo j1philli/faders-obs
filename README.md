@@ -11,13 +11,19 @@ transitions). Your Twitch stream is not touched.
 [latest release](https://github.com/j1philli/faders-obs/releases/latest), and get your key from the
 [Faders portal](https://faders.tv/portal/). Setup guide: [faders.tv/docs/streamer-setup](https://faders.tv/docs/streamer-setup/).
 
-- **Tools → Faders** opens the settings (OBS's own properties window, no custom UI code):
-  key (with a link to the portal to get one), the **Faders** list (names, in order; "Your plan
-  includes N faders"), **What's on each fader** (a block per fader, its name on the left: one dropdown per
+- **Tools → Faders** opens the settings (OBS's own properties window, no custom UI code). Top to
+  bottom: a status card (connected as which channel, plan, how many viewers are mixing, or what's
+  wrong and how to fix it, in the theme's colours; it redraws itself when the state changes),
+  a callout for each problem with the stream and for an available update, **Send audio to
+  Faders** (a tickable group that turns the plugin on and off: **Plugin key** with a link to
+  the portal, and **Only connect while I'm live**), **Your faders** (names, in order, and how
+  many the plan includes), **What's on each fader** (a block per fader, its name on the left: one dropdown per
   source or OBS track on it, then "Add a source or track…", which offers only what isn't on a
   fader yet; a row's "Remove from …" sends a source to Everything else, which is listed by name
-  underneath) and "Only send while
-  streaming". There is no "Auto": sources the rule table in `PROTOCOL.md` recognises start on
+  underneath), then the version and links. The info rows are Qt rich text (`<table>` cards,
+  colours from `obs_frontend_is_theme_dark`); lines are broken in the plugin rather than
+  word-wrapped by Qt, which would leave tall gaps in OBS's form layout.
+  There is no "Auto": sources the rule table in `PROTOCOL.md` recognises start on
   their fader and show as ordinary rows. A track on a fader is an assignment rule, not a second
   audio path: every source ticked for it plays on that fader. Nothing is de-duplicated: a source
   that also has a fader of its own, or is ticked for another assigned track, plays on each, and
@@ -42,11 +48,14 @@ transitions). Your Twitch stream is not touched.
   128 kbps per layer of upload (less for quiet layers),
   and **0 while nobody is listening**: the hub tells the plugin its listener count, the
   plugin keeps a 60 s backlog and replays it when the first listener arrives.
-- The key goes in an `Authorization: Bearer` header. Reconnects back off 1 s → 30 s, so a wrong
-  key doesn't hammer the hub. Status shows in the settings window and the OBS log (`[faders]`).
+- The key goes in an `Authorization: Bearer` header. Reconnects back off 1 s → 30 s; a key the
+  hub refuses (HTTP 401/403) is retried every 5 minutes, and the window says the key wasn't
+  accepted. Pasting a new key reconnects straight away. Status shows in the settings window and
+  the OBS log (`[faders]`). The hub's `hello` names the channel and plan; the window remembers
+  them for that key, so it can say "Connects as …" while offline.
 - Heartbeat: pings the hub every 20 s and reconnects after 60 s without a reply, so a connection
   silently dropped by a router or proxy recovers on its own.
-- When the hub reports a newer release, **Tools → Faders** shows "Update available" with a link
+- When the hub reports a newer release, **Tools → Faders** shows "Faders X.Y.Z is available" with a link
   to the download page. The plugin never updates itself.
 - Scriptable, on the global proc handler: `faders_configure(server, key, faders, only_live)`
   (`faders` = "Voice,Game,Music,Discord"), `faders_assign(source, fader)` (a fader name,

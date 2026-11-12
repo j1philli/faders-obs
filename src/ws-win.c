@@ -42,13 +42,18 @@ static wchar_t *widen(const char *s)
 	return w;
 }
 
-static void fire_close(struct fdr_ws *ws, const char *reason)
+static void fire_close_status(struct fdr_ws *ws, int http_status, const char *reason)
 {
 	InterlockedExchange(&ws->open, 0);
 	if (InterlockedCompareExchange(&ws->closed, 1, 0) != 0)
 		return;
 	if (!ws->destroyed && ws->cb.on_close)
-		ws->cb.on_close(ws->param, reason);
+		ws->cb.on_close(ws->param, http_status, reason);
+}
+
+static void fire_close(struct fdr_ws *ws, const char *reason)
+{
+	fire_close_status(ws, 0, reason);
 }
 
 // Stores a freshly created handle unless destroy() already ran; then closes it instead.
@@ -68,6 +73,7 @@ static DWORD WINAPI run(LPVOID param)
 {
 	struct fdr_ws *ws = param;
 	char reason[160] = "connection failed";
+	int rejected = 0; // the handshake's HTTP status when the server refused the upgrade
 
 	URL_COMPONENTS uc = {sizeof(uc)};
 	wchar_t host[256], path[2048];
@@ -112,6 +118,7 @@ static DWORD WINAPI run(LPVOID param)
 	if (status != 101) {
 		// e.g. 401 for a wrong key: same wording as the macOS transport.
 		snprintf(reason, sizeof(reason), "server rejected connection (HTTP %lu)", status);
+		rejected = status >= 400 && status < 600 ? (int)status : 0;
 		goto done;
 	}
 	if (!keep_handle(ws, &ws->socket, WinHttpWebSocketCompleteUpgrade(ws->request, 0)))
@@ -155,7 +162,7 @@ static DWORD WINAPI run(LPVOID param)
 	free(buf);
 
 done:
-	fire_close(ws, reason);
+	fire_close_status(ws, rejected, reason);
 	return 0;
 }
 

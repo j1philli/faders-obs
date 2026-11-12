@@ -34,13 +34,22 @@ typedef struct fdr_uplink_status {
 	int uplink_kbps;
 	unsigned long long chunks_sent;
 	char last_error[160];
+	// Why the last connection attempt failed, kept until one succeeds (last_error is cleared
+	// on every attempt): "" before any failure.
+	char failure[160];
+	int rejected_status;       // that failure's HTTP status when the hub refused it (401: key not known), else 0
+	bool ever_connected;       // this uplink has connected at least once
+	// From the hub's hello (0.4.0+ hubs): who the key belongs to. "" / 0 until it arrives.
+	char channel[256];         // the channel's display name (the hub sends at most 60 characters)
+	char plan[24];             // "free", "pro", …
+	int listener_limit;        // viewers the plan lets mix at once; 0 = unknown or unlimited
+	char platforms[32];        // "twitch", "youtube" or "twitch,youtube"
 	int stream_track;          // OBS track the stream's audio encoder uses (1-6), 0 when not watched
 	bool stream_track_silent;  // that track has been silent for a while although the layers aren't
 	int stems;                 // layers on the wire (the faders plus "Everything else")
 	int max_stems;             // layers the channel's plan allows (from the hub); 0 = not told
 	char mix_mismatch[64];     // a source sent to Faders but missing from the stream; "" = fine
 	char mix_duplicate[64];    // a source in the stream more than once (its fader carries one copy); "" = fine
-
 } fdr_uplink_status;
 
 fdr_uplink_t *fdr_uplink_start(const fdr_uplink_config *cfg);

@@ -32,14 +32,19 @@ struct fdr_ws {
 	atomic_int pending;
 };
 
-static void fdr_ws_fire_close(fdr_ws_t *ws, NSString *reason)
+static void fdr_ws_fire_close_status(fdr_ws_t *ws, int http_status, NSString *reason)
 {
 	atomic_store(&ws->open, false);
 	bool expected = false;
 	if (!atomic_compare_exchange_strong(&ws->closed, &expected, true))
 		return;
 	if (!atomic_load(&ws->destroyed) && ws->cb.on_close)
-		ws->cb.on_close(ws->param, reason ? reason.UTF8String : "closed");
+		ws->cb.on_close(ws->param, http_status, reason ? reason.UTF8String : "closed");
+}
+
+static void fdr_ws_fire_close(fdr_ws_t *ws, NSString *reason)
+{
+	fdr_ws_fire_close_status(ws, 0, reason);
 }
 
 static void fdr_ws_receive(fdr_ws_t *ws)
@@ -90,9 +95,12 @@ static void fdr_ws_receive(fdr_ws_t *ws)
 	// A rejected handshake (e.g. 401 for a bad key) surfaces here with the HTTP status.
 	NSHTTPURLResponse *resp = (NSHTTPURLResponse *)task.response;
 	NSString *reason = error.localizedDescription ?: @"connection ended";
-	if ([resp isKindOfClass:[NSHTTPURLResponse class]] && resp.statusCode >= 400)
-		reason = [NSString stringWithFormat:@"server rejected connection (HTTP %ld)", (long)resp.statusCode];
-	fdr_ws_fire_close(ws, reason);
+	int status = 0;
+	if ([resp isKindOfClass:[NSHTTPURLResponse class]] && resp.statusCode >= 400) {
+		status = (int)resp.statusCode;
+		reason = [NSString stringWithFormat:@"server rejected connection (HTTP %d)", status];
+	}
+	fdr_ws_fire_close_status(ws, status, reason);
 }
 @end
 

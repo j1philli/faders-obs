@@ -60,7 +60,7 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 !define MUI_ABORTWARNING
 
 !define MUI_WELCOMEPAGE_TITLE "Faders"
-!define MUI_WELCOMEPAGE_TEXT "Faders sends your voice, game and music as separate layers, so each viewer with the Faders browser extension can set their own levels. Your Twitch stream doesn't change.$\r$\n$\r$\nClose OBS before you continue."
+!define MUI_WELCOMEPAGE_TEXT "Faders sends your voice, game and music as separate layers, so each viewer with the Faders browser extension can set their own levels. Your stream itself doesn't change.$\r$\n$\r$\nClose OBS before you continue."
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "${ROOT}/LICENSE"
 !define MUI_DIRECTORYPAGE_TEXT_TOP "Faders goes in a folder named faders inside the folder OBS loads plugins from. Keep this folder unless you run portable OBS (use the plugins folder inside it) or keep your plugins somewhere else."
@@ -68,7 +68,7 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !define MUI_FINISHPAGE_TITLE "You're set"
-!define MUI_FINISHPAGE_TEXT "1. Open OBS, then Tools → Faders.$\r$\n2. Paste the key from faders.tv/portal.$\r$\n3. Add a fader for each thing viewers should control, and pick its sources."
+!define MUI_FINISHPAGE_TEXT "1. Open OBS, then Tools → Faders.$\r$\n2. Paste your plugin key from faders.tv/portal.$\r$\n3. Under What's on each fader, pick the sources for each fader."
 !define MUI_FINISHPAGE_LINK "Open the Faders portal"
 !define MUI_FINISHPAGE_LINK_LOCATION "https://faders.tv/portal/"
 !insertmacro MUI_PAGE_FINISH

@@ -291,6 +291,9 @@ static void on_open(void *param)
 	u->last_sent_seq = -1; // the hub may have restarted: offer everything we still hold
 	u->conn_gen++;
 	u->status.last_error[0] = 0;
+	u->status.failure[0] = 0;
+	u->status.rejected_status = 0;
+	u->status.ever_connected = true;
 	u->stream_status_dirty = true; // a (re)connected hub hasn't heard it
 	u->stems_dirty = true;
 	pthread_mutex_unlock(&u->mu);
@@ -305,9 +308,9 @@ static void on_text(void *param, const char *text)
 	pthread_mutex_unlock(&u->mu);
 	if (!strcmp(text, "pong"))
 		return;
-	// The hub sends {"type":"listeners","n":N}, {"type":"update","latest":"X.Y.Z"} and
-	// {"type":"quality","kbps":N,"maxStems":M}. Parsed as JSON so a value is never mistaken for
-	// a key.
+	// The hub sends {"type":"listeners","n":N}, {"type":"update","latest":"X.Y.Z"},
+	// {"type":"quality","kbps":N,"maxStems":M} and {"type":"hello","channel":…,"plan":…,
+	// "limit":N,"twitch":bool,"youtube":bool}. Parsed as JSON so a value is never mistaken for a key.
 	obs_data_t *message = obs_data_create_from_json(text);
 	if (!message)
 		return;
@@ -331,6 +334,15 @@ static void on_text(void *param, const char *text)
 			u->status.max_stems = u->max_stems;
 		}
 		pthread_mutex_unlock(&u->mu);
+	} else if (!strcmp(type, "hello")) {
+		bool twitch = obs_data_get_bool(message, "twitch"), youtube = obs_data_get_bool(message, "youtube");
+		long long limit = obs_data_get_int(message, "limit");
+		pthread_mutex_lock(&u->mu);
+		snprintf(u->status.channel, sizeof(u->status.channel), "%s", obs_data_get_string(message, "channel"));
+		snprintf(u->status.plan, sizeof(u->status.plan), "%s", obs_data_get_string(message, "plan"));
+		snprintf(u->status.platforms, sizeof(u->status.platforms), "%s", twitch && youtube ? "twitch,youtube" : twitch ? "twitch" : youtube ? "youtube" : "");
+		u->status.listener_limit = limit > 0 && limit <= INT_MAX ? (int)limit : 0;
+		pthread_mutex_unlock(&u->mu);
 	} else if (!strcmp(type, "listeners")) {
 		long long n = obs_data_get_int(message, "n");
 		if (n >= 0 && n <= INT_MAX) {
@@ -345,13 +357,15 @@ static void on_text(void *param, const char *text)
 	obs_data_release(message);
 }
 
-static void on_close(void *param, const char *reason)
+static void on_close(void *param, int http_status, const char *reason)
 {
 	struct fdr_uplink *u = param;
 	pthread_mutex_lock(&u->mu);
 	u->connected = false;
 	u->listeners = 0;
 	set_error(u, reason);
+	snprintf(u->status.failure, sizeof(u->status.failure), "%s", reason);
+	u->status.rejected_status = http_status;
 	pthread_mutex_unlock(&u->mu);
 	blog(LOG_WARNING, "[faders] disconnected: %s", reason);
 }
@@ -397,12 +411,17 @@ static void maintain_connection(struct fdr_uplink *u, uint64_t now)
 		u->connected = false;
 		u->listeners = 0;
 		set_error(u, "no response from the server");
+		snprintf(u->status.failure, sizeof(u->status.failure), "no response from the server");
+		u->status.rejected_status = 0;
 		blog(LOG_WARNING, "[faders] no response from the server; reconnecting");
 		open = ping_due = false;
 	}
 	if (ping_due)
 		u->last_ping_ns = now;
 	bool dead = u->ws && !u->connected && u->status.last_error[0];
+	// A key the hub doesn't know won't start working by itself: retry rarely (a new key restarts
+	// the uplink straight away), in case the refusal was the hub's mistake.
+	bool refused = u->status.rejected_status == 401 || u->status.rejected_status == 403;
 	pthread_mutex_unlock(&u->mu);
 	if (ping_due)
 		fdr_ws_send_text(u->ws, "ping");
@@ -411,7 +430,7 @@ static void maintain_connection(struct fdr_uplink *u, uint64_t now)
 		u->ws = NULL;
 		// Back off 1 s → 30 s so a wrong key doesn't hammer the hub.
 		u->backoff_ns = u->backoff_ns ? (u->backoff_ns * 2 > 30000000000ULL ? 30000000000ULL : u->backoff_ns * 2) : 1000000000ULL;
-		u->next_connect_ns = now + u->backoff_ns;
+		u->next_connect_ns = now + (refused ? 300000000000ULL : u->backoff_ns);
 	}
 	if (!u->ws && now >= u->next_connect_ns) {
 		static const fdr_ws_callbacks cb = {on_open, on_text, on_close};
@@ -422,6 +441,7 @@ static void maintain_connection(struct fdr_uplink *u, uint64_t now)
 		if (!u->ws) {
 			pthread_mutex_lock(&u->mu);
 			set_error(u, "invalid server URL");
+			snprintf(u->status.failure, sizeof(u->status.failure), "invalid server URL");
 			pthread_mutex_unlock(&u->mu);
 			u->next_connect_ns = now + 5000000000ULL;
 		}

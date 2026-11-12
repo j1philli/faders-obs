@@ -35,8 +35,11 @@ MODULE_EXPORT const char *obs_module_description(void)
 
 #define SOURCE_ID "faders_uplink"
 #define PORTAL_URL "https://faders.tv/portal/"
+#define PORTAL_KEYS_URL "https://faders.tv/portal/#plugin-keys"
 #define DOWNLOAD_URL "https://faders.tv/streamers/#download"
-#define DOCS_URL "https://faders.tv/docs/faders-setup/"
+#define DOCS_URL "https://faders.tv/docs/faders-sources/"
+#define SETUP_URL "https://faders.tv/docs/streamer-setup/"
+#define SUPPORT_URL "https://faders.tv/support/"
 // Production hub. The key alone identifies the channel, so streamers only paste their key. The
 // server isn't shown in the settings; tests point it elsewhere through faders_configure.
 #define DEFAULT_SERVER "wss://hub.faders.tv/ingest"
@@ -55,7 +58,7 @@ static bool streaming;
 static bool frontend_loaded;
 static int forced_stream_track; // headless tests: faders_watch_stream_track
 static int forced_transition_ms; // headless tests: faders_transition_duration
-static int max_stems_seen = FDR_MAX_FADERS;
+static int max_stems_seen = FDR_MAX_FADERS; // the mixer's cap: none until the hub says
 static bool mixer_unavailable; // the OBS audio output isn't stereo 48 kHz: nothing runs
 
 static char *config_file(void)
@@ -311,26 +314,440 @@ static const char *pending_update(obs_data_t *settings)
 	return NULL;
 }
 
+// The end of a key: enough to tell whether the remembered account belongs to the key in the
+// field, without keeping a second copy of the key.
+static const char *key_tail(const char *key)
+{
+	size_t n = strlen(key);
+	return n > 6 ? key + n - 6 : key;
+}
+
+// ── How the window looks ────────────────────────────────────────────────────────────────
+// OBS draws info rows as Qt labels, which render a subset of HTML: the status is a tinted card,
+// problems are callouts with a coloured edge, help text is muted. Colours follow OBS's theme.
+
+enum tone { TONE_NEUTRAL, TONE_OK, TONE_WARN, TONE_ERROR, TONE_ACCENT };
+
+struct look {
+	const char *muted;
+	const char *edge[5]; // per tone: the dot and the callout's edge
+	const char *fill[5]; // per tone: the card's background
+	const char *live;    // the LIVE badge
+};
+
+static const struct look dark_look = {
+	.muted = "#a4a9b6",
+	.edge = {"#8a91a3", "#3ccf7c", "#f0b232", "#ff5c6c", "#8f7bff"},
+	.fill = {"#2a2d37", "#1d3329", "#3a3020", "#3e2026", "#272645"},
+	.live = "#ff4d8d",
+};
+static const struct look light_look = {
+	.muted = "#5c6270",
+	.edge = {"#8a91a3", "#1f9d55", "#c98a00", "#d6303c", "#6a4cff"},
+	.fill = {"#eef0f4", "#e5f5eb", "#fcf1d9", "#fde6e8", "#ece8ff"},
+	.live = "#e0306f",
+};
+
+static const struct look *look(void)
+{
+	return obs_frontend_is_theme_dark() ? &dark_look : &light_look;
+}
+
+// Text for an HTML label: names come from the streamer and the hub.
+static void cat_escaped(struct dstr *out, const char *s)
+{
+	for (; s && *s; s++) {
+		if (*s == '&')
+			dstr_cat(out, "&amp;");
+		else if (*s == '<')
+			dstr_cat(out, "&lt;");
+		else if (*s == '>')
+			dstr_cat(out, "&gt;");
+		else
+			dstr_ncat(out, s, 1);
+	}
+}
+
+// A callout: a coloured edge, then a bold title over a body (HTML).
+static void callout_html(struct dstr *out, enum tone tone, const char *title_html, const char *body_html)
+{
+	const struct look *l = look();
+	dstr_catf(out,
+		  "<table width=\"100%%\" cellspacing=\"0\" cellpadding=\"0\"><tr>"
+		  "<td width=\"4\" bgcolor=\"%s\"></td>"
+		  "<td bgcolor=\"%s\" style=\"padding: 9px 12px;\"><b>%s</b>",
+		  l->edge[tone], l->fill[tone], title_html);
+	if (body_html && *body_html)
+		dstr_catf(out, "<br>%s", body_html);
+	dstr_cat(out, "</td></tr></table>");
+}
+
+// Line breaks every `width` visible characters or so, at a space outside a tag. OBS's form layout
+// sizes a word-wrapped label for its narrowest width and leaves a tall gap around it, so labels
+// don't wrap themselves: the text is broken here instead.
+static void break_lines(const char *html, int width, struct dstr *out)
+{
+	int col = 0;
+	bool tag = false;
+	for (const char *p = html; *p; p++) {
+		if (*p == '<') {
+			tag = true;
+			if (!strncmp(p, "<br", 3) || !strncmp(p, "<tr", 3) || !strncmp(p, "<td", 3))
+				col = 0;
+		}
+		if (tag) {
+			dstr_ncat(out, p, 1);
+			tag = *p != '>';
+			continue;
+		}
+		if (*p == ' ' && col >= width) {
+			dstr_cat(out, "<br>");
+			col = 0;
+			continue;
+		}
+		if (*p == '&') { // an entity is one character
+			const char *semi = strchr(p, ';');
+			if (semi && semi - p < 8) {
+				dstr_ncat(out, p, semi - p + 1);
+				p = semi;
+				col++;
+				continue;
+			}
+		}
+		dstr_ncat(out, p, 1);
+		if (((unsigned char)*p & 0xc0) != 0x80) // count characters, not UTF-8 bytes
+			col++;
+	}
+}
+
+#define LINE_CHARS 84
+
+static obs_property_t *add_html(obs_properties_t *props, const char *name, const char *html)
+{
+	struct dstr text = {0};
+	break_lines(html, LINE_CHARS, &text);
+	obs_property_t *p = obs_properties_add_text(props, name, text.array, OBS_TEXT_INFO);
+	obs_property_text_set_info_word_wrap(p, false); // on by default
+	dstr_free(&text);
+	return p;
+}
+
+static obs_property_t *add_callout(obs_properties_t *props, const char *name, enum tone tone, const char *title_html, const char *body_html)
+{
+	struct dstr html = {0};
+	callout_html(&html, tone, title_html, body_html);
+	obs_property_t *p = add_html(props, name, html.array);
+	dstr_free(&html);
+	return p;
+}
+
+// Muted help text under a control.
+static obs_property_t *add_hint(obs_properties_t *props, const char *name, const char *html)
+{
+	struct dstr text = {0};
+	dstr_printf(&text, "<span style=\"color: %s;\">%s</span>", look()->muted, html);
+	obs_property_t *p = add_html(props, name, text.array);
+	dstr_free(&text);
+	return p;
+}
+
+// ── Status ──────────────────────────────────────────────────────────────────────────────
+// One description of where things stand, shown as the card at the top of the window (and as
+// plain text by faders_status for the tests). Problems the stream has get their own callouts
+// below the card, which then only points at them.
+
+struct status_view {
+	enum tone tone;
+	struct dstr title;  // plain text
+	struct dstr detail; // HTML
+	struct dstr meta;   // HTML, muted: plan, faders, platforms
+	struct dstr fine;   // plain text, small: the technical reason, for support
+	bool live;
+};
+
+static void status_view_free(struct status_view *v)
+{
+	dstr_free(&v->title);
+	dstr_free(&v->detail);
+	dstr_free(&v->meta);
+	dstr_free(&v->fine);
+}
+
+static const char *plan_label(const char *plan)
+{
+	if (!plan || !*plan)
+		return NULL;
+	if (!strcmp(plan, "free"))
+		return "Free";
+	if (!strcmp(plan, "pro"))
+		return "Pro";
+	if (!strcmp(plan, "partner"))
+		return "Partner";
+	return NULL;
+}
+
+// The stream's problems the plugin can see, each shown as a callout (see src_properties).
+static int problem_count(const fdr_uplink_status *st)
+{
+	return (st->stream_track_silent ? 1 : 0) + (st->mix_mismatch[0] ? 1 : 0) + (st->mix_duplicate[0] ? 1 : 0);
+}
+
+static void describe_status(obs_data_t *s, const fdr_uplink_status *st, struct status_view *v)
+{
+	memset(v, 0, sizeof(*v));
+	v->live = streaming;
+	const char *account = obs_data_get_string(s, "account");
+	bool remembered = *account && strcmp(obs_data_get_string(s, "account_key"), key_tail(obs_data_get_string(s, "key"))) == 0;
+	if (mixer_unavailable) {
+		v->tone = TONE_ERROR;
+		dstr_copy(&v->title, "Faders can't run");
+		dstr_copy(&v->detail, "It needs stereo, 48 kHz audio. Change it in OBS Settings → Audio, then restart OBS.");
+		return;
+	}
+	if (!obs_data_get_bool(s, "enabled")) {
+		v->tone = TONE_NEUTRAL;
+		dstr_copy(&v->title, "Faders is off");
+		dstr_copy(&v->detail, "Viewers can't mix your stream. Tick <b>Send audio to Faders</b> to turn it on.");
+		return;
+	}
+	if (!*obs_data_get_string(s, "key")) {
+		v->tone = TONE_ACCENT;
+		dstr_copy(&v->title, "Add your plugin key");
+		dstr_copy(&v->detail, "<a href=\"" PORTAL_KEYS_URL "\">Create a plugin key</a> in the Faders portal, then paste it below.");
+		return;
+	}
+	if (!st->running && streaming) { // should be running: the uplink didn't start
+		v->tone = TONE_ERROR;
+		dstr_copy(&v->title, "Faders didn't start");
+		dstr_copy(&v->detail, "Look for [faders] lines in Help → Log Files → View Current Log.");
+		return;
+	}
+	if (!st->running) {
+		v->tone = TONE_NEUTRAL;
+		dstr_copy(&v->title, "Ready");
+		if (remembered) {
+			dstr_copy(&v->detail, "Connects as <b>");
+			cat_escaped(&v->detail, account);
+			dstr_cat(&v->detail, "</b> when you go live.");
+		} else {
+			dstr_copy(&v->detail, "Connects when you go live.");
+		}
+		return;
+	}
+	if (!st->connected) {
+		int code = st->rejected_status;
+		if (code == 401 || code == 403) {
+			v->tone = TONE_ERROR;
+			dstr_copy(&v->title, "Plugin key not accepted");
+			dstr_copy(&v->detail, "It may have been revoked, or only part of it was pasted. <a href=\"" PORTAL_KEYS_URL "\">Create a new key</a> and paste it below.");
+		} else if (code == 429) {
+			v->tone = TONE_WARN;
+			dstr_copy(&v->title, "Too many connection attempts");
+			dstr_copy(&v->detail, "Faders will try again shortly.");
+		} else if (st->failure[0]) {
+			v->tone = TONE_WARN;
+			dstr_copy(&v->title, "Can't reach Faders");
+			dstr_copy(&v->detail, "Retrying automatically. If this doesn't clear, check your internet connection or firewall.");
+			dstr_copy(&v->fine, st->failure);
+		} else {
+			v->tone = TONE_NEUTRAL;
+			dstr_copy(&v->title, "Connecting…");
+		}
+		return;
+	}
+
+	int problems = problem_count(st);
+	v->tone = st->stream_track_silent ? TONE_ERROR : problems ? TONE_WARN : TONE_OK;
+	const char *who = st->channel[0] ? st->channel : remembered ? account : NULL;
+	if (who) {
+		dstr_copy(&v->title, "Connected as ");
+		dstr_cat(&v->title, who);
+	} else {
+		dstr_copy(&v->title, "Connected");
+	}
+	if (problems)
+		dstr_printf(&v->detail, "%s needs your attention below.", problems == 1 ? "One thing" : problems == 2 ? "Two things" : "Three things");
+	else if (st->listeners == 0)
+		dstr_copy(&v->detail, "No one is mixing yet. Viewers start by clicking <b>Mix this stream</b> on your channel.");
+	else if (st->listener_limit > 0 && st->listeners >= st->listener_limit)
+		dstr_printf(&v->detail, "<b>%d of %d</b> viewers are mixing: your plan's limit. <a href=\"" PORTAL_URL "\">More with Pro</a>", st->listeners, st->listener_limit);
+	else if (st->listener_limit > 0)
+		dstr_printf(&v->detail, "<b>%d</b> of %d viewers are mixing.", st->listeners, st->listener_limit);
+	else
+		dstr_printf(&v->detail, "<b>%d</b> viewer%s mixing.", st->listeners, st->listeners == 1 ? " is" : "s are");
+
+	const char *plan = plan_label(st->plan);
+	if (plan)
+		dstr_catf(&v->meta, "%s plan", plan);
+	if (st->stems > 0)
+		dstr_catf(&v->meta, "%s%d faders + Everything else", v->meta.len ? " · " : "", st->stems - 1);
+	if (st->platforms[0])
+		dstr_catf(&v->meta, "%s%s", v->meta.len ? " · " : "",
+			  !strcmp(st->platforms, "twitch,youtube") ? "Twitch and YouTube" : !strcmp(st->platforms, "youtube") ? "YouTube" : "Twitch");
+}
+
+// The card at the top of the window.
+static void status_card_html(const struct status_view *v, struct dstr *out)
+{
+	const struct look *l = look();
+	dstr_catf(out, "<table width=\"100%%\" cellspacing=\"0\" cellpadding=\"0\" bgcolor=\"%s\"><tr>", l->fill[v->tone]);
+	char *logo = obs_module_file("faders-mark.png");
+	if (logo) {
+		dstr_catf(out, "<td width=\"40\" valign=\"middle\" style=\"padding: 14px 0 14px 14px;\"><img src=\"%s\" width=\"32\" height=\"32\"></td>", logo);
+		bfree(logo);
+	}
+	dstr_cat(out, "<td valign=\"middle\" style=\"padding: 14px 16px;\">");
+	dstr_catf(out, "<span style=\"color: %s;\">●</span>&nbsp;<span style=\"font-size: 13pt; font-weight: 600;\">", l->edge[v->tone]);
+	cat_escaped(out, v->title.array);
+	dstr_cat(out, "</span>");
+	if (v->live)
+		dstr_catf(out, "&nbsp;&nbsp;<span style=\"background-color: %s; color: #ffffff; font-size: 8pt; font-weight: 700;\">&nbsp;LIVE&nbsp;</span>", l->live);
+	if (v->detail.len)
+		dstr_catf(out, "<br>%s", v->detail.array);
+	if (v->meta.len)
+		dstr_catf(out, "<br><span style=\"color: %s; font-size: small;\">%s</span>", l->muted, v->meta.array);
+	if (v->fine.len) {
+		dstr_catf(out, "<br><span style=\"color: %s; font-size: small;\">", l->muted);
+		cat_escaped(out, v->fine.array);
+		dstr_cat(out, "</span>");
+	}
+	dstr_cat(out, "</td></tr></table>");
+}
+
+// HTML → text, for faders_status (the tests read it).
+static void strip_tags(const char *html, struct dstr *out)
+{
+	bool tag = false;
+	for (const char *p = html; p && *p; p++) {
+		if (*p == '<') {
+			tag = true;
+			if (!strncmp(p, "<br", 3))
+				dstr_cat(out, " ");
+		}
+		else if (*p == '>')
+			tag = false;
+		else if (!tag && !strncmp(p, "&amp;", 5))
+			dstr_cat(out, "&"), p += 4;
+		else if (!tag && !strncmp(p, "&lt;", 4))
+			dstr_cat(out, "<"), p += 3;
+		else if (!tag && !strncmp(p, "&gt;", 4))
+			dstr_cat(out, ">"), p += 3;
+		else if (!tag && !strncmp(p, "&nbsp;", 6))
+			dstr_cat(out, " "), p += 5;
+		else if (!tag)
+			dstr_ncat(out, p, 1);
+	}
+}
+
 static void status_text(struct dstr *out)
 {
 	fdr_uplink_status st;
 	get_status(&st);
-	if (mixer_unavailable)
-		dstr_copy(out, "Not running: Faders needs stereo, 48 kHz OBS audio (Settings → Audio).");
-	else if (!st.running)
-		dstr_copy(out, streaming ? "Not running. Check your key." : "Idle. Starts when you go live.");
-	else if (!st.connected)
-		dstr_printf(out, "Connecting… %s", st.last_error[0] ? st.last_error : "");
-	else if (st.stream_track_silent)
-		dstr_printf(out, "Connected, but Track %d (what OBS streams) is silent: viewers hear nothing.", st.stream_track);
-	else if (st.mix_mismatch[0])
-		dstr_printf(out, "Connected. \"%s\" isn't in your stream the way Faders sends it: moved to Everything else.", st.mix_mismatch);
-	else if (st.mix_duplicate[0])
-		dstr_printf(out, "Connected. \"%s\" is in your stream more than once: its fader only controls one copy.", st.mix_duplicate);
-	else if (st.listeners == 0)
-		dstr_printf(out, "Connected. Paused until a viewer turns Faders on. %d layers%s.", st.stems, st.stream_track ? "; Faders mix matches your stream" : "");
-	else
-		dstr_printf(out, "Connected. %d listener%s, %d kbps, %d layers%s.", st.listeners, st.listeners == 1 ? "" : "s", st.uplink_kbps, st.stems, st.stream_track ? "; Faders mix matches your stream" : "");
+	obs_data_t *s = settings_source ? obs_source_get_settings(settings_source) : obs_data_create();
+	struct status_view v;
+	describe_status(s, &st, &v);
+	dstr_copy(out, v.title.array);
+	if (v.detail.len) {
+		dstr_cat(out, ". ");
+		strip_tags(v.detail.array, out);
+	}
+	if (v.meta.len) {
+		dstr_cat(out, " (");
+		strip_tags(v.meta.array, out);
+		dstr_cat(out, ")");
+	}
+	if (st.connected && st.listeners > 0)
+		dstr_catf(out, " %d kbps.", st.uplink_kbps);
+	if (v.fine.len)
+		dstr_catf(out, " [%s]", v.fine.array);
+	status_view_free(&v);
+	obs_data_release(s);
+}
+
+// ── Keeping an open window current ──────────────────────────────────────────────────────
+// The window is rebuilt from scratch whenever OBS is asked to (obs_source_update_properties), so
+// a cheap fingerprint of what the status shows is checked twice a second from the tick, and the
+// window is rebuilt when it changes (at most every 2 s: a busy channel's listener count moves).
+
+static uint64_t status_fingerprint(const fdr_uplink_status *st)
+{
+	uint64_t h = 1469598103934665603ULL;
+#define MIX(x) (h = (h ^ (uint64_t)(x)) * 1099511628211ULL)
+	MIX(st->running);
+	MIX(st->connected);
+	MIX(st->listeners);
+	MIX(st->failure[0] != 0);
+	MIX(st->rejected_status);
+	MIX(st->stream_track_silent);
+	MIX(st->stream_track);
+	MIX(st->stems);
+	MIX(st->max_stems);
+	MIX(st->listener_limit);
+	MIX(streaming);
+	MIX(mixer_unavailable);
+	for (const char *p = st->mix_mismatch; *p; p++)
+		MIX(*p);
+	for (const char *p = st->mix_duplicate; *p; p++)
+		MIX(*p);
+	for (const char *p = st->channel; *p; p++)
+		MIX(*p);
+	for (const char *p = st->plan; *p; p++)
+		MIX(*p);
+#undef MIX
+	return h;
+}
+
+static uint64_t shown_fingerprint;
+static uint64_t last_check_ns, last_refresh_ns;
+static bool refresh_queued;
+
+// UI thread: remember who the key belongs to (so the window can say so while offline), then
+// redraw an open window.
+static void refresh_window(void *unused)
+{
+	UNUSED_PARAMETER(unused);
+	refresh_queued = false;
+	if (!settings_source)
+		return;
+	fdr_uplink_status st;
+	get_status(&st);
+	obs_data_t *s = obs_source_get_settings(settings_source);
+	const char *tail = key_tail(obs_data_get_string(s, "key"));
+	if (st.connected && st.channel[0] &&
+	    (strcmp(obs_data_get_string(s, "account"), st.channel) != 0 || strcmp(obs_data_get_string(s, "account_key"), tail) != 0 ||
+	     (st.max_stems > 0 && obs_data_get_int(s, "account_faders") != st.max_stems) || strcmp(obs_data_get_string(s, "account_plan"), st.plan) != 0)) {
+		obs_data_set_string(s, "account", st.channel);
+		obs_data_set_string(s, "account_key", tail);
+		obs_data_set_string(s, "account_plan", st.plan);
+		if (st.max_stems > 0)
+			obs_data_set_int(s, "account_faders", st.max_stems);
+		save_settings(s);
+	}
+	obs_data_release(s);
+	obs_source_update_properties(settings_source);
+}
+
+static void watch_status(void *unused, float seconds)
+{
+	UNUSED_PARAMETER(unused);
+	UNUSED_PARAMETER(seconds);
+	uint64_t now = os_gettime_ns();
+	if (now - last_check_ns < 500000000ULL || refresh_queued)
+		return;
+	last_check_ns = now;
+	// Never wait on the lock here (this is the graphics thread; starting or stopping holds it).
+	if (pthread_mutex_trylock(&uplink_mu) != 0)
+		return;
+	fdr_uplink_status st;
+	fdr_uplink_get_status(uplink, &st);
+	pthread_mutex_unlock(&uplink_mu);
+	uint64_t fp = status_fingerprint(&st);
+	if (fp == shown_fingerprint || now - last_refresh_ns < 2000000000ULL)
+		return;
+	shown_fingerprint = fp;
+	last_refresh_ns = now;
+	refresh_queued = true;
+	obs_queue_task(OBS_TASK_UI, refresh_window, NULL, false);
 }
 
 // ── Settings source (properties window) ─────────────────────────────────────────────────
@@ -515,7 +932,7 @@ static void duplicate_warning(const struct dialog_model *m, struct dstr *out)
 		if (src->fader >= 0) {
 			seen |= 1u << src->fader;
 			count++;
-			dstr_cat(&where, m->names[src->fader]);
+			cat_escaped(&where, m->names[src->fader]);
 		}
 		for (int k = 0; k < m->n_items; k++) {
 			const struct dialog_item *tr = &m->items[k];
@@ -523,15 +940,21 @@ static void duplicate_warning(const struct dialog_model *m, struct dstr *out)
 			if (!t || tr->fader < 0 || !(src->mixers & (1u << (t - 1))) || (seen & (1u << tr->fader)))
 				continue;
 			seen |= 1u << tr->fader;
-			dstr_catf(&where, "%s%s (with Track %d)", count ? ", " : "", m->names[tr->fader], t);
+			dstr_cat(&where, count ? ", " : "");
+			cat_escaped(&where, m->names[tr->fader]);
+			dstr_catf(&where, " (with Track %d)", t);
 			count++;
 		}
-		if (count > 1)
-			dstr_catf(out, "%s\"%s\" is on %d faders: %s.", out->len ? " " : "", src->label, count, where.array);
+		if (count > 1) {
+			dstr_cat(out, "\"");
+			cat_escaped(out, src->label);
+			dstr_catf(out, "\" is on %d faders: %s.<br>", count, where.array);
+		}
 		dstr_free(&where);
 	}
 	if (out->len)
-		dstr_cat(out, " Viewers hear a source once for each fader it's on, so these are louder for them than in your stream. To fix it, untick the source for that track in Edit → Advanced Audio Properties, or remove it from its own fader.");
+		dstr_cat(out, "Viewers hear it once for each fader, so it's louder for them than in your stream. Take it off one of "
+			      "those faders, or untick that track for it in Edit → Advanced Audio Properties.");
 }
 
 static void add_assignment_rows(obs_properties_t *group, obs_data_t *settings)
@@ -540,11 +963,8 @@ static void add_assignment_rows(obs_properties_t *group, obs_data_t *settings)
 	build_dialog_model(&m, settings);
 	struct dstr dup = {0};
 	duplicate_warning(&m, &dup);
-	if (dup.len) {
-		obs_property_t *w = obs_properties_add_text(group, "dup_warning", dup.array, OBS_TEXT_INFO);
-		obs_property_text_set_info_type(w, OBS_TEXT_INFO_WARNING);
-		obs_property_text_set_info_word_wrap(w, true);
-	}
+	if (dup.len)
+		add_callout(group, "dup_warning", TONE_WARN, "Some sources are on more than one fader", dup.array);
 	dstr_free(&dup);
 	n_dialog_rows = 0;
 	dialog_names[0] = 0;
@@ -567,15 +987,11 @@ static void add_assignment_rows(obs_properties_t *group, obs_data_t *settings)
 		if (m.items[i].track || m.items[i].fader >= 0 || m.items[i].via)
 			continue;
 		dstr_cat(&rest, rest.len ? ", " : "");
-		dstr_cat(&rest, m.items[i].label);
+		cat_escaped(&rest, m.items[i].label);
 	}
 	struct dstr text = {0};
-	if (rest.len)
-		dstr_printf(&text, "Everything else: %s. Anything not on a fader above goes here, along with alerts and transitions.", rest.array);
-	else
-		dstr_copy(&text, "Everything else: nothing right now. Any source you don't put on a fader goes here, along with transitions.");
-	obs_property_t *info = obs_properties_add_text(group, "rest_info", text.array, OBS_TEXT_INFO);
-	obs_property_text_set_info_word_wrap(info, true);
+	dstr_printf(&text, "<b>Everything else:</b> %s. Any source not on a fader above goes here, along with alerts and transitions.", rest.len ? rest.array : "nothing right now");
+	add_hint(group, "rest_info", text.array);
 	dstr_free(&rest);
 	dstr_free(&text);
 }
@@ -585,99 +1001,111 @@ static obs_properties_t *src_properties(void *data)
 	UNUSED_PARAMETER(data);
 	obs_properties_t *props = obs_properties_create();
 	obs_data_t *settings = obs_source_get_settings(settings_source);
+	fdr_uplink_status st;
+	get_status(&st);
+	shown_fingerprint = status_fingerprint(&st);
 
-	struct dstr status = {0};
-	status_text(&status);
-	obs_property_t *st = obs_properties_add_text(props, "status_info", status.array, OBS_TEXT_INFO);
-	obs_property_text_set_info_type(st, OBS_TEXT_INFO_NORMAL);
-	dstr_free(&status);
+	// ── Status card, then a callout for each problem it mentions ─────────────────────────
+	struct status_view view;
+	describe_status(settings, &st, &view);
+	struct dstr html = {0};
+	status_card_html(&view, &html);
+	add_html(props, "status_info", html.array);
+	status_view_free(&view);
 
-	fdr_uplink_status now_st;
-	get_status(&now_st);
-	if (now_st.stream_track_silent) {
-		struct dstr warn = {0};
-		dstr_printf(&warn,
-			    "Twitch is getting no audio: Track %d, the one OBS streams, is silent. In Edit → Advanced "
-			    "Audio Properties, tick Track %d for your mic, game and music. "
-			    "<a href=\"" DOCS_URL "\">Setup guide</a>",
-			    now_st.stream_track, now_st.stream_track);
-		obs_property_t *w = obs_properties_add_text(props, "stream_silent", warn.array, OBS_TEXT_INFO);
-		obs_property_text_set_info_type(w, OBS_TEXT_INFO_ERROR);
-		obs_property_text_set_info_word_wrap(w, true);
-		dstr_free(&warn);
+	if (st.stream_track_silent) {
+		dstr_printf(&html,
+			    "Track %d, the one OBS streams, is silent, so viewers hear nothing. In Edit → Advanced Audio "
+			    "Properties, tick Track %d for your mic, game and music. <a href=\"" SETUP_URL "\">Setup guide</a>",
+			    st.stream_track, st.stream_track);
+		add_callout(props, "stream_silent", TONE_ERROR, "Your stream has no audio", html.array);
 	}
-	if (now_st.mix_mismatch[0]) {
-		struct dstr warn = {0};
-		dstr_printf(&warn,
-			    "\"%s\" is sent to Faders but isn't in your stream the same way (not on Track %d, captured twice, or "
-			    "monitor-only), so it has been moved to Everything else for this session. Fix the source, then "
-			    "restart the stream or the plugin. <a href=\"" DOCS_URL "\">How to assign sources</a>",
-			    now_st.mix_mismatch, now_st.stream_track);
-		obs_property_t *w = obs_properties_add_text(props, "mix_mismatch", warn.array, OBS_TEXT_INFO);
-		obs_property_text_set_info_type(w, OBS_TEXT_INFO_WARNING);
-		obs_property_text_set_info_word_wrap(w, true);
-		dstr_free(&warn);
+	if (st.mix_mismatch[0]) {
+		struct dstr title = {0};
+		dstr_cat(&title, "\"");
+		cat_escaped(&title, st.mix_mismatch);
+		dstr_cat(&title, "\" moved to Everything else");
+		dstr_printf(&html,
+			    "It's sent to Faders but isn't in your stream the same way: not on Track %d, captured twice, or "
+			    "monitor only. Fix the source, then restart the stream. <a href=\"" DOCS_URL "\">How to assign sources</a>",
+			    st.stream_track);
+		add_callout(props, "mix_mismatch", TONE_WARN, title.array, html.array);
+		dstr_free(&title);
 	}
-	if (now_st.mix_duplicate[0]) {
-		struct dstr warn = {0};
-		dstr_printf(&warn,
-			    "\"%s\" is in your stream more than once: it is captured twice (for example by Desktop Audio as "
-			    "well), or another source plays the same audio. Its fader only controls one copy; the other is in "
-			    "Everything else. Nothing has been moved.",
-			    now_st.mix_duplicate);
-		obs_property_t *w = obs_properties_add_text(props, "mix_duplicate", warn.array, OBS_TEXT_INFO);
-		obs_property_text_set_info_type(w, OBS_TEXT_INFO_WARNING);
-		obs_property_text_set_info_word_wrap(w, true);
-		dstr_free(&warn);
+	if (st.mix_duplicate[0]) {
+		struct dstr title = {0};
+		dstr_cat(&title, "\"");
+		cat_escaped(&title, st.mix_duplicate);
+		dstr_cat(&title, "\" is in your stream twice");
+		add_callout(props, "mix_duplicate", TONE_WARN, title.array,
+			    "It's captured twice (for example by Desktop Audio as well), or another source plays the same "
+			    "audio. Its fader controls one copy; the other stays in Everything else.");
+		dstr_free(&title);
 	}
-	if (mixer_unavailable) {
-		obs_property_t *w = obs_properties_add_text(props, "unavailable", "Faders isn't running: it needs stereo, 48 kHz OBS audio (Settings → Audio → Channels and Sample Rate).", OBS_TEXT_INFO);
-		obs_property_text_set_info_type(w, OBS_TEXT_INFO_ERROR);
-		obs_property_text_set_info_word_wrap(w, true);
-	}
-
-	// The hub says when a newer release is out (kept in the settings, so it outlives the stream);
-	// the link always goes to faders.tv.
-	obs_data_t *cur = settings_source ? obs_source_get_settings(settings_source) : NULL;
-	const char *update = pending_update(cur);
+	// The hub says when a newer release is out (kept in the settings, so it outlives the stream).
+	const char *update = pending_update(settings);
 	if (update) {
-		struct dstr label = {0};
-		dstr_printf(&label, "Update available: Faders %s (you have %s). <a href=\"%s\">Download it</a>", update, FDR_VERSION_STR, DOWNLOAD_URL);
-		obs_property_t *upd = obs_properties_add_text(props, "update", label.array, OBS_TEXT_INFO);
-		obs_property_text_set_info_type(upd, OBS_TEXT_INFO_WARNING);
-		dstr_free(&label);
+		struct dstr title = {0};
+		dstr_printf(&title, "Faders %s is available", update);
+		dstr_printf(&html, "You have %s. <a href=\"%s\">Download the update</a>", FDR_VERSION_STR, DOWNLOAD_URL);
+		add_callout(props, "update", TONE_ACCENT, title.array, html.array);
+		dstr_free(&title);
 	}
-	obs_data_release(cur);
 
-	obs_properties_add_bool(props, "enabled", "Send Faders layers");
-	obs_properties_add_text(props, "key", "Key", OBS_TEXT_PASSWORD);
-	// An info row renders as a QLabel with external links enabled: a real hyperlink that opens the
-	// browser directly (a URL button asks "Open this URL?" first).
-	obs_properties_add_text(props, "portal", "<a href=\"" PORTAL_URL "\">Open the Faders portal to get key</a>", OBS_TEXT_INFO);
-	obs_properties_add_bool(props, "only_live", "Only send while streaming");
+	// ── Connection: the group's tick is the on/off switch and greys out the rest ─────────
+	obs_properties_t *conn = obs_properties_create();
+	obs_property_t *key = obs_properties_add_text(conn, "key", "Plugin key", OBS_TEXT_PASSWORD);
+	obs_property_set_long_description(key, "Your key from the Faders portal. It isn't your Twitch or YouTube stream key.");
+	add_hint(conn, "key_hint",
+		 *obs_data_get_string(settings, "key") ? "Manage your keys in the <a href=\"" PORTAL_KEYS_URL "\">Faders portal</a>."
+						       : "No key yet? <a href=\"" PORTAL_KEYS_URL "\">Create one in the Faders portal</a>.");
+	obs_property_t *only_live = obs_properties_add_bool(conn, "only_live", "Only connect while I'm live");
+	obs_property_set_long_description(only_live, "Untick to stay connected whenever OBS is open, for example to try it with a viewer before going live.");
+	obs_properties_add_group(props, "enabled", "Send audio to Faders", OBS_GROUP_CHECKABLE, conn);
 
-	// ── Faders: the list of names viewers get, capped by the plan ──────────────────────
+	// ── Faders: the names viewers get, capped by the plan ────────────────────────────────
 	obs_properties_t *faders = obs_properties_create();
-	struct dstr cap = {0};
-	int allowance = now_st.max_stems > 0 ? now_st.max_stems : max_stems_seen;
 	char names[FDR_MAX_FADERS][FDR_STEM_NAME_MAX];
 	int n_names = fader_names(settings, names, FDR_MAX_FADERS);
-	if (n_names > allowance)
-		dstr_printf(&cap, "Your plan includes %d faders: \"%s\" and the ones after it are folded into Everything else until you upgrade. <a href=\"" PORTAL_URL "\">Plans</a>", allowance, names[allowance]);
-	else
-		dstr_printf(&cap, "Your plan includes %d faders. \"Everything else\" (alerts, transitions, anything not in a fader) is always sent too, so what viewers hear adds up to your stream.", allowance);
-	obs_property_t *capinfo = obs_properties_add_text(faders, "cap_info", cap.array, OBS_TEXT_INFO);
-	obs_property_text_set_info_word_wrap(capinfo, true);
-	dstr_free(&cap);
-	obs_properties_add_editable_list(faders, S_FADERS, "Faders (one per line, in order)", OBS_EDITABLE_LIST_TYPE_STRINGS, NULL, NULL);
-	obs_properties_add_group(props, "faders_group", "Faders", OBS_GROUP_NORMAL, faders);
+	// The plan's allowance: from the hub while connected, else as last seen for this key.
+	int allowance = st.max_stems > 0 ? st.max_stems : 0;
+	const char *plan = plan_label(st.plan);
+	if (!allowance && !strcmp(obs_data_get_string(settings, "account_key"), key_tail(obs_data_get_string(settings, "key")))) {
+		allowance = (int)obs_data_get_int(settings, "account_faders");
+		plan = plan_label(obs_data_get_string(settings, "account_plan"));
+	}
+	if (allowance > 0 && n_names > allowance) {
+		struct dstr title = {0};
+		dstr_printf(&title, "Your %s%splan includes %d faders", plan ? plan : "", plan ? " " : "", allowance);
+		dstr_copy(&html, "\"");
+		cat_escaped(&html, names[allowance]);
+		dstr_cat(&html, "\" and the faders after it are mixed into Everything else. <a href=\"" PORTAL_URL "\">Upgrade for more</a>");
+		add_callout(faders, "cap_info", TONE_WARN, title.array, html.array);
+		dstr_free(&title);
+	} else if (allowance > 0) {
+		dstr_printf(&html, "Your %s%splan includes %d faders. Everything else (alerts, transitions, anything not on a fader) is always sent too, so together they add up to your stream.",
+			    plan ? plan : "", plan ? " " : "", allowance);
+		add_hint(faders, "cap_info", html.array);
+	} else {
+		add_hint(faders, "cap_info",
+			 "Everything else (alerts, transitions, anything not on a fader) is always sent too, so together they add up to your stream.");
+	}
+	obs_property_t *list = obs_properties_add_editable_list(faders, S_FADERS, "Fader names", OBS_EDITABLE_LIST_TYPE_STRINGS, NULL, NULL);
+	obs_property_set_long_description(list, "In the order viewers see them. Use + to add a fader and double-click a name to rename it.");
+	obs_properties_add_group(props, "faders_group", "Your faders", OBS_GROUP_NORMAL, faders);
 
 	// ── What goes on each fader: its sources and OBS tracks, one dropdown each ────────
 	obs_properties_t *assign = obs_properties_create();
 	add_assignment_rows(assign, settings);
 	obs_properties_add_group(props, "sources_group", "What's on each fader", OBS_GROUP_NORMAL, assign);
-	obs_properties_add_text(props, "version", "Faders plugin " FDR_VERSION_STR, OBS_TEXT_INFO);
 
+	dstr_printf(&html,
+		    "<span style=\"color: %s; font-size: small;\">Faders %s &nbsp;·&nbsp; <a href=\"" SETUP_URL "\">Setup guide</a> &nbsp;·&nbsp; "
+		    "<a href=\"" PORTAL_URL "\">Portal</a> &nbsp;·&nbsp; <a href=\"" SUPPORT_URL "\">Help</a></span>",
+		    look()->muted, FDR_VERSION_STR);
+	add_html(props, "version", html.array);
+
+	dstr_free(&html);
 	obs_data_release(settings);
 	return props;
 }
@@ -978,7 +1406,9 @@ static void proc_dialog(void *unused, calldata_t *cd)
 	for (obs_property_t *p = group ? obs_properties_first(obs_property_group_content(group)) : NULL; p; obs_property_next(&p)) {
 		const char *key = obs_property_name(p);
 		if (obs_property_get_type(p) != OBS_PROPERTY_LIST) {
-			dstr_catf(&out, "%s\t%s\n", key, obs_property_description(p));
+			dstr_catf(&out, "%s\t", key);
+			strip_tags(obs_property_description(p), &out);
+			dstr_cat(&out, "\n");
 			continue;
 		}
 		const char *value = obs_data_get_string(settings, key);
@@ -1087,12 +1517,14 @@ bool obs_module_load(void)
 	// No-ops when there's no OBS frontend (e.g. the headless test host).
 	obs_frontend_add_tools_menu_item("Faders", open_settings, NULL);
 	obs_frontend_add_event_callback(on_frontend_event, NULL);
+	obs_add_tick_callback(watch_status, NULL);
 	blog(LOG_INFO, "[faders] loaded (version %s)", FDR_VERSION_STR);
 	return true;
 }
 
 void obs_module_unload(void)
 {
+	obs_remove_tick_callback(watch_status, NULL);
 	apply(NULL);
 	obs_source_release(settings_source);
 	settings_source = NULL;

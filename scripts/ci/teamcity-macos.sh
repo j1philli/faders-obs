@@ -43,6 +43,7 @@ for _ in $(seq 1 30); do curl -s "localhost:$PORT/health" | grep -q ok && break;
 M="$PWD/test/media"
 build/faders-headless "ws://127.0.0.1:$PORT/ingest/ci_channel" wrong-key "$M/voice.wav" "$M/game.wav" "$M/music.wav" 5 > host-badkey.log 2>&1 || true
 grep -q "HTTP 401" host-badkey.log || { echo "##teamcity[buildProblem description='wrong key was not rejected with HTTP 401']"; exit 1; }
+grep -q "Plugin key not accepted" host-badkey.log || { echo "##teamcity[buildProblem description='the status did not say the key was not accepted']"; exit 1; }
 
 # The wire as a listener sees it: three named faders plus Everything else, which is silent while
 # every source is in a fader (the subtraction is exact)...
@@ -51,6 +52,7 @@ HOST=$!
 sleep 6
 node test/plugin-listener.mjs --server "ws://127.0.0.1:$PORT" --channel ci_channel --seconds 15 --stems 4 --names "Voice,Game,Music,rest"
 wait $HOST || true
+grep -q "Connected as ci_channel" host.log || { echo "##teamcity[buildProblem description='the status did not name the channel from the hub hello']"; exit 1; }
 
 # ...and carries a source that is in no fader.
 FADERS_EXTRA_WAV="$M/voice.wav" build/faders-headless "ws://127.0.0.1:$PORT/ingest/ci_channel" dev-token "$M/voice.wav" "$M/game.wav" "$M/music.wav" 30 > host-rest.log 2>&1 &

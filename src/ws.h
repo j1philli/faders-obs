@@ -24,8 +24,10 @@ typedef struct fdr_ws fdr_ws_t;
 typedef struct fdr_ws_callbacks {
 	void (*on_open)(void *param);
 	void (*on_text)(void *param, const char *text);
-	// Called once when the connection fails or closes. `reason` is human-readable.
-	void (*on_close)(void *param, const char *reason);
+	// Called once when the connection fails or closes. `reason` is human-readable (for the log);
+	// `http_status` is the handshake's HTTP status when the server refused the upgrade (401 for a
+	// key it doesn't know), else 0.
+	void (*on_close)(void *param, int http_status, const char *reason);
 } fdr_ws_callbacks;
 
 // Starts connecting; callbacks fire on a background thread. `bearer` may be NULL.
