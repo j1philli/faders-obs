@@ -49,6 +49,12 @@ that audio than the fader carries (captured twice, or another source plays the s
 fader is right as it is, so nothing moves: the plugin logs it and warns in Tools → Faders until
 the source has played without it for 3 s. That warning is not sent to the hub.
 
+No evidence is taken while the program transition runs, nor for 1.5 s after it ends. The mixer
+models a transition as a linear crossfade of the frontend's duration; where the real one differs
+(Fade to Color, Slide, Swipe, a per-scene duration, the T-bar) the difference is the sources' own
+audio in the remainder, which is not a mismatch. The mix stays exact throughout: that audio is in
+Everything else for the length of the transition.
+
 ## Virtual mixer: libobs facts (verified with `faders-mixcheck` against libobs 32.2.2)
 
 The plugin consumes no OBS tracks: it builds each Faders layer itself from per-source audio,
@@ -149,7 +155,7 @@ release land on the tick; hidden / preview-only / Monitor Only / off-track sourc
 nothing leaking; 300 ms fade residual −72 dBFS during the fade (−154 after); sync offset +200 ms
 aligned; a duplicated source counted once; two dozen sources p50 42–52 µs, p99 230–320 µs per 21 ms tick;
 plan cap folds faders (hub `maxStems` 2 → 2 + Everything else on the wire); an injected
-mismatch dropped after 1.3 s; the same audio from a second source warned about and left on its fader.
+mismatch dropped after 1.3 s; a 2.5 s Fade to Color to a silent scene and back drops nothing; the same audio from a second source warned about and left on its fader.
 
 Rule table for automatic assignment (first match; a fader that isn't configured falls back as
 noted): mic inputs (`wasapi_input_capture`, `coreaudio_input_capture`, `pulse_input_capture`,

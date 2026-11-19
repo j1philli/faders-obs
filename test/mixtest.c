@@ -621,6 +621,56 @@ int main(int argc, char **argv)
 		window(500, 600);
 		result(during < -40.0 && rest_dbfs() < -60.0 && !obs_source_active(ta) && obs_source_active(tb), "7 fade 300 ms: residual with the per-sample model",
 		       "rest during the fade %.1f dBFS (want < -40), after %.1f dBFS; A active=%d B active=%d; mismatch \"%s\"", during, rest_dbfs(), obs_source_active(ta), obs_source_active(tb), mismatch());
+		// ── 7b: a long Fade to Color must not cost a source its fader ───────────────────
+		// Fade to Color takes A out by the switch point and brings B in after it, so for the whole
+		// transition both have less gain than the linear crossfade the mixer assumes. That
+		// difference is the source's own audio, missing from the stream: exactly what the
+		// mismatch check looks for. Fading to and from a silent scene (a "be right back" card)
+		// is the clearest case: nothing else is in the remainder. A transition must not count
+		// as evidence.
+		{
+			obs_source_t *ca = tone("color-tone", 770, 0.3, 1);
+			assign("color-tone", "Voice");
+			obs_scene_t *sc = obs_scene_create("C"), *sd = obs_scene_create("D (silent)");
+			obs_scene_add(sc, ca);
+			obs_source_t *ftc = obs_source_create("fade_to_color_transition", "fade to color", NULL, NULL);
+			calldata_t td = {0};
+			calldata_set_int(&td, "ms", 2500);
+			call("faders_transition_duration", &td);
+			obs_set_output_source(0, ftc);
+			obs_transition_set(ftc, obs_scene_get_source(sc));
+			os_sleep_ms(1200);
+			bool dropped = false;
+			double worst = -999;
+			// Out and back: the tone spends 2.5 s as the outgoing side, then as the incoming one.
+			for (int leg = 0; leg < 2; leg++) {
+				obs_transition_start(ftc, OBS_TRANSITION_MODE_AUTO, 2500, obs_scene_get_source(leg ? sc : sd));
+				for (int i = 0; i < 40; i++) {
+					os_sleep_ms(100);
+					fetch_stats();
+					dropped = dropped || source_dropped("color-tone");
+					if (i < 25 && rest_dbfs() > worst)
+						worst = rest_dbfs();
+				}
+			}
+			window(300, 600);
+			double voice_color = sqrt(R_VOICE * R_VOICE + TONE_RMS(0.3) * TONE_RMS(0.3));
+			// "worst" shows the case is real: the remainder is loud during the fade (the model is off).
+			result(ftc && worst > -40.0 && !dropped && mismatch()[0] == 0 && close_to(fader_rms("Voice"), voice_color, 0.03) && rest_dbfs() < -60.0, "7b Fade to Color 2.5 s: no source dropped",
+			       "dropped %d, mismatch \"%s\"; remainder during the fades up to %.1f dBFS; after: Voice %.4f (want %.4f: voice + the tone), rest %.1f dBFS", dropped, mismatch(), worst, fader_rms("Voice"), voice_color, rest_dbfs());
+			calldata_set_int(&td, "ms", 300);
+			call("faders_transition_duration", &td);
+			calldata_free(&td);
+			obs_set_output_source(0, tr);
+			obs_transition_clear(ftc);
+			obs_source_release(ftc);
+			obs_source_remove(obs_scene_get_source(sc));
+			obs_source_remove(obs_scene_get_source(sd));
+			obs_scene_release(sc);
+			obs_scene_release(sd);
+			assign("color-tone", "");
+			obs_source_release(ca);
+		}
 		// Leave the program on an empty scene so A/B's tones don't count in later cases.
 		obs_scene_t *empty = obs_scene_create("empty");
 		obs_transition_set(tr, obs_scene_get_source(empty));
@@ -681,7 +731,10 @@ int main(int argc, char **argv)
 	obs_source_t *twin_a = NULL, *twin_b = NULL;
 	{
 		obs_data_t *ts = obs_data_create();
-		obs_data_set_double(ts, "freq", 1000); // whole cycles per second: the clock's second boundary doesn't matter
+		// Whole cycles per second, so the clock's second boundary doesn't matter. A low tone: the
+		// two copies can reach the mix a few samples apart, which at 1 kHz is enough phase to
+		// take the correlation under the threshold now and then; at 100 Hz it is a degree or two.
+		obs_data_set_double(ts, "freq", 100);
 		obs_data_set_double(ts, "amp", 0.2);
 		obs_data_set_bool(ts, "clock", true);
 		twin_a = obs_source_create("faders_test_tone", "twin-a", ts, NULL);
@@ -692,7 +745,15 @@ int main(int argc, char **argv)
 	obs_source_set_audio_mixers(twin_b, 1);
 	assign("twin-a", "Voice");
 	obs_sceneitem_t *twin_a_item = obs_scene_add(many, twin_a), *twin_b_item = obs_scene_add(many, twin_b);
-	window(2500, 800);
+	// Three windows in a row (1.5 to 2 s) from the last time the source list was rebuilt, and
+	// adding two sources can rebuild it more than once: wait for the warning, not a fixed time.
+	for (int i = 0; i < 80; i++) {
+		os_sleep_ms(100);
+		fetch_stats();
+		if (duplicate_is("twin-a"))
+			break;
+	}
+	window(300, 800);
 	double voice_twin = sqrt(R_VOICE * R_VOICE + TONE_RMS(0.2) * TONE_RMS(0.2));
 	result(duplicate_is("twin-a") && !source_dropped("twin-a") && mismatch()[0] == 0 && close_to(fader_rms("Voice"), voice_twin, 0.03) && close_to(rest_rms(), TONE_RMS(0.2), 0.05),
 	       "11 same audio from two sources: warned, not moved", "duplicate twin-a %d, dropped %d, mismatch \"%s\", Voice %.4f (want %.4f), rest %.4f (want %.4f: the other copy)", duplicate_is("twin-a"),

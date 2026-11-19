@@ -33,6 +33,7 @@
 #define ORACLE_R 0.5
 #define ORACLE_RUNS 3
 #define ORACLE_CALM 6 // windows without it before a duplicate warning is withdrawn
+#define ORACLE_SETTLE_NS 1500000000ULL // after a transition ends, before evidence counts again
 #define ORACLE_MIN_ENERGY 1e-6 // Σ x² over a window below this is no evidence
 #define MAX_CB 2048
 #define MAX_TREE 128
@@ -123,6 +124,12 @@ struct fdr_mixer {
 	uint64_t given_dur_ns;   // from the frontend's transition duration setting (0 = none)
 	uint64_t dbg_until;      // FADERS_DEBUG: log every tick until this time
 	uint64_t learned_dur_ns; // measured from the last fade: when get_time() reached 1
+	// The oracle takes no evidence while the program transition runs, nor until this time after
+	// it: transitions are modelled (a linear crossfade of the frontend's duration) or left to
+	// Everything else, and where the real one differs (Fade to Color, Slide, Swipe, a per-scene
+	// duration, the T-bar) the difference is the sources' own audio. That is no mismatch.
+	bool in_transition;
+	uint64_t oracle_hold_until_ns;
 };
 
 static void announce(struct fdr_mixer *m);
@@ -403,10 +410,19 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 		}
 		blog(LOG_INFO, "[faders-dbg] tick ts-start=%.1f ms fading=%d stopped=%d rest=%.1f dBFS gates=%s names=%s", ((double)ts - (double)m->fade.start_ns) / 1e6, fading, m->fade.stopped, 10 * log10(rest_sq / (2.0 * FRAMES) + 1e-20), why, names);
 	}
+	// A transition is no evidence (see in_transition): drop the window in progress and start a
+	// new one once it is over and the audio has settled. Runs of earlier windows are kept.
+	bool oracle_hold = fading || m->in_transition || ts < m->oracle_hold_until_ns;
+	if (oracle_hold) {
+		for (int k = 0; k < n; k++)
+			snap->e[k].xy = snap->e[k].xx = 0;
+		yy = 0;
+		oracle_ticks = -1; // ++ below makes it 0
+	}
 	// Oracle sums for every included source, every other tick (the window is 0.5 s; half the
 	// samples are plenty of evidence and it halves the per-tick cost).
 	for (int k = 0; k < n; k++) {
-		if (!inc[k] || (m->st.ticks & 1))
+		if (!inc[k] || (m->st.ticks & 1) || oracle_hold)
 			continue;
 		struct entry *e = &snap->e[k];
 		// Float sums within the tick (1024 samples), accumulated in double across the window.
@@ -419,7 +435,8 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 		e->xy += xy;
 		e->xx += xx;
 	}
-	yy += rest_sq;
+	if (!oracle_hold)
+		yy += rest_sq;
 	if (++oracle_ticks >= ORACLE_TICKS) {
 		oracle_ticks = 0;
 		// r < 0: the stream lacks audio the fader carries (the source isn't in the stream the way
@@ -710,6 +727,9 @@ static void track_transition(struct fdr_mixer *m)
 		pthread_mutex_lock(&m->mu);
 		obs_weak_source_t *was = m->tr;
 		m->tr = weak;
+		// The old transition's stop signal can no longer reach us: don't wait for it.
+		m->in_transition = false;
+		m->oracle_hold_until_ns = os_gettime_ns() + ORACLE_SETTLE_NS;
 		pthread_mutex_unlock(&m->mu);
 		obs_weak_source_release(was);
 		if (t) {
@@ -782,6 +802,7 @@ static void on_transition_start(void *data, calldata_t *cd)
 	if (obs_transition_fixed(t))
 		f.active = false; // a stinger or other fixed-length transition: its audio is the transition's own; let the residual carry the change
 	pthread_mutex_lock(&m->mu);
+	m->in_transition = true; // every kind, modelled or not
 	m->fade = f;
 	m->fade.learning = f.active;
 	if (getenv("FADERS_DEBUG"))
@@ -811,6 +832,8 @@ static void on_transition_stop(void *data, calldata_t *cd)
 		m->fade.stopped = true;
 		m->fade.stopped_ns = os_gettime_ns();
 	}
+	m->in_transition = false;
+	m->oracle_hold_until_ns = os_gettime_ns() + ORACLE_SETTLE_NS;
 	pthread_mutex_unlock(&m->mu);
 }
 
