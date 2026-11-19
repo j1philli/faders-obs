@@ -34,6 +34,13 @@ grep -E "^(PASS|FAIL|SKIP)" mixcheck.log
 # The hub's update notice is kept in the settings (test/update-notice.mjs runs its own mock hub).
 node test/update-notice.mjs
 
+# Transport shutdown: once fdr_ws_destroy() returns, no callback is running (test/wstest.c).
+node test/ws-flood.mjs --port "$((PORT + 4))" > ws-flood.log 2>&1 &
+FLOOD=$!
+for _ in $(seq 1 30); do curl -s "localhost:$((PORT + 4))/health" | grep -q ok && break; sleep 1; done
+build/faders-wstest "ws://127.0.0.1:$((PORT + 4))" 100 || { kill $FLOOD 2>/dev/null; echo "##teamcity[buildProblem description='faders-wstest: a callback ran after the socket was destroyed']"; exit 1; }
+kill $FLOOD 2>/dev/null || true
+
 node test/mock-hub.mjs --port "$PORT" > hub.log 2>&1 &
 HUB=$!
 HOST=""

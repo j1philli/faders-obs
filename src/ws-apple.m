@@ -10,6 +10,7 @@
  */
 // macOS WebSocket transport on NSURLSessionWebSocketTask: system TLS, no bundled libraries.
 #import <Foundation/Foundation.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include "ws.h"
 
@@ -30,7 +31,23 @@ struct fdr_ws {
 	atomic_bool closed;   // on_close already delivered
 	atomic_bool destroyed; // owner gone: deliver nothing
 	atomic_int pending;
+	// Held for the whole of every callback into the owner, and by fdr_ws_destroy() while it marks
+	// the socket destroyed. So once destroy returns, no callback is running and none will start:
+	// the owner can free itself. (Checking `destroyed` alone isn't enough: a callback that passed
+	// the check could still be inside the owner.) Recursive: a failed receive reports the close
+	// from inside the receive handler. Owners must not hold a lock their callbacks take while
+	// calling fdr_ws_destroy().
+	pthread_mutex_t cb_mu;
 };
+
+static void cb_lock_init(fdr_ws_t *ws)
+{
+	pthread_mutexattr_t attr;
+	pthread_mutexattr_init(&attr);
+	pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+	pthread_mutex_init(&ws->cb_mu, &attr);
+	pthread_mutexattr_destroy(&attr);
+}
 
 static void fdr_ws_fire_close_status(fdr_ws_t *ws, int http_status, NSString *reason)
 {
@@ -38,8 +55,10 @@ static void fdr_ws_fire_close_status(fdr_ws_t *ws, int http_status, NSString *re
 	bool expected = false;
 	if (!atomic_compare_exchange_strong(&ws->closed, &expected, true))
 		return;
+	pthread_mutex_lock(&ws->cb_mu);
 	if (!atomic_load(&ws->destroyed) && ws->cb.on_close)
 		ws->cb.on_close(ws->param, http_status, reason ? reason.UTF8String : "closed");
+	pthread_mutex_unlock(&ws->cb_mu);
 }
 
 static void fdr_ws_fire_close(fdr_ws_t *ws, NSString *reason)
@@ -47,19 +66,22 @@ static void fdr_ws_fire_close(fdr_ws_t *ws, NSString *reason)
 	fdr_ws_fire_close_status(ws, 0, reason);
 }
 
+// Called with cb_mu held and the socket not destroyed (ws->task is only cleared under cb_mu).
 static void fdr_ws_receive(fdr_ws_t *ws)
 {
 	NSURLSessionWebSocketTask *task = ws->task;
 	[task receiveMessageWithCompletionHandler:^(NSURLSessionWebSocketMessage *msg, NSError *err) {
-		if (atomic_load(&ws->destroyed))
-			return;
-		if (err) {
-			fdr_ws_fire_close(ws, err.localizedDescription);
-			return;
+		pthread_mutex_lock(&ws->cb_mu);
+		if (!atomic_load(&ws->destroyed)) {
+			if (err) {
+				fdr_ws_fire_close(ws, err.localizedDescription);
+			} else {
+				if (msg.type == NSURLSessionWebSocketMessageTypeString && ws->cb.on_text)
+					ws->cb.on_text(ws->param, msg.string.UTF8String);
+				fdr_ws_receive(ws);
+			}
 		}
-		if (msg.type == NSURLSessionWebSocketMessageTypeString && ws->cb.on_text)
-			ws->cb.on_text(ws->param, msg.string.UTF8String);
-		fdr_ws_receive(ws);
+		pthread_mutex_unlock(&ws->cb_mu);
 	}];
 }
 
@@ -69,12 +91,16 @@ static void fdr_ws_receive(fdr_ws_t *ws)
 	didOpenWithProtocol:(NSString *)protocol
 {
 	fdr_ws_t *ws = self.owner;
-	if (!ws || atomic_load(&ws->destroyed))
+	if (!ws)
 		return;
-	atomic_store(&ws->open, true);
-	if (ws->cb.on_open)
-		ws->cb.on_open(ws->param);
-	fdr_ws_receive(ws);
+	pthread_mutex_lock(&ws->cb_mu);
+	if (!atomic_load(&ws->destroyed)) {
+		atomic_store(&ws->open, true);
+		if (ws->cb.on_open)
+			ws->cb.on_open(ws->param);
+		fdr_ws_receive(ws);
+	}
+	pthread_mutex_unlock(&ws->cb_mu);
 }
 
 - (void)URLSession:(NSURLSession *)session
@@ -111,6 +137,7 @@ fdr_ws_t *fdr_ws_connect(const char *url, const char *bearer, const fdr_ws_callb
 		if (!nsurl)
 			return NULL;
 		fdr_ws_t *ws = calloc(1, sizeof(*ws));
+		cb_lock_init(ws);
 		ws->cb = *cb;
 		ws->param = param;
 		ws->delegate = [FdrWsDelegate new];
@@ -163,7 +190,10 @@ void fdr_ws_destroy(fdr_ws_t *ws)
 {
 	if (!ws)
 		return;
+	// Waits for a callback that is inside the owner right now; after this none can start.
+	pthread_mutex_lock(&ws->cb_mu);
 	atomic_store(&ws->destroyed, true);
+	atomic_store(&ws->open, false);
 	@autoreleasepool {
 		ws->delegate.owner = NULL;
 		[ws->task cancelWithCloseCode:NSURLSessionWebSocketCloseCodeNormalClosure reason:nil];
@@ -172,6 +202,8 @@ void fdr_ws_destroy(fdr_ws_t *ws)
 		ws->session = nil;
 		ws->delegate = nil;
 	}
-	// Completion blocks may still be queued and reference `ws`; they check `destroyed` first.
-	// Leak the small struct rather than race them (one per reconnect, a few dozen bytes).
+	pthread_mutex_unlock(&ws->cb_mu);
+	// Completion blocks may still be queued and reference `ws` and its lock; they check
+	// `destroyed` under the lock and do nothing. So the small struct is leaked rather than
+	// freed under them (one per reconnect, about a hundred bytes).
 }

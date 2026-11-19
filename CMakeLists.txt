@@ -112,6 +112,13 @@ else()
 endif()
 add_dependencies(faders-headless faders)
 
+# Transport shutdown: no callback after fdr_ws_destroy() returns (test/wstest.c, with test/ws-flood.mjs).
+if(APPLE)
+  add_executable(faders-wstest test/wstest.c src/ws-apple.m)
+  target_compile_definitions(faders-wstest PRIVATE FDR_VERSION_STR="${PROJECT_VERSION}")
+  target_link_libraries(faders-wstest PRIVATE "-framework Foundation")
+endif()
+
 # Mixer check: proves the libobs behaviour the virtual mixer relies on (test/mixcheck.c), no plugin.
 add_executable(faders-mixcheck test/mixcheck.c)
 target_include_directories(faders-mixcheck PRIVATE ${OBS_INCLUDES})
