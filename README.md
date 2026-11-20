@@ -154,3 +154,5 @@ programs that talk to this plugin over the network protocol in `PROTOCOL.md`.
 Name synchronization regression test (after building): `node test/fader-names.mjs`. It loads the real plugin in libobs, receives Unicode labels, rejects an excessive name, applies a live rename and checks the saved local labels.
 
 Update notice regression test (after building): `node test/update-notice.mjs`. It checks that the hub's "newer release" notice is saved locally, so Tools → Faders shows it after the stream ends, and that a malformed version is ignored.
+
+Resume regression test (after building): `node test/resume-backlog.mjs`. It pauses the uplink (no listeners), has the mock hub forget its ring as a hibernated hub object does, and checks that the next listener gets the plugin's backlog from before the pause, which auto-sync needs to find a YouTube stream's delay.
