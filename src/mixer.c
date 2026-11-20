@@ -141,6 +141,98 @@ static inline bool near(uint64_t a, uint64_t b)
 
 // ── Audio thread ────────────────────────────────────────────────────────────────────────
 
+// The per-tick loops, written so the compiler turns them into SIMD. Each works on whole buffers
+// that never overlap (restrict), one buffer at a time. Sums are the exception: a compiler may not
+// reorder a float sum, so a plain loop adds one sample at a time, each add waiting for the one
+// before. The sums below only feed the oracle and the level statistics (nothing that reaches a
+// stem), so they run in 16 independent lanes, written with the compilers' vector types (clang
+// and GCC, NEON and SSE alike).
+
+// dst += src, per sample: exactly what the plain loop did.
+static inline void add_into(float *restrict dst, const float *restrict src)
+{
+	for (size_t i = 0; i < FRAMES; i++)
+		dst[i] += src[i];
+}
+
+#if defined(__GNUC__) && (FRAMES % 16 == 0)
+typedef float v4f __attribute__((vector_size(16), aligned(4)));
+static inline v4f v4f_at(const float *p)
+{
+	v4f v;
+	memcpy(&v, p, sizeof(v));
+	return v;
+}
+static inline float v4f_sum4(v4f a, v4f b, v4f c, v4f d)
+{
+	v4f t = (a + b) + (c + d);
+	return (t[0] + t[1]) + (t[2] + t[3]);
+}
+
+// Σ (a² + b²): a tick's energy for the level statistics and the oracle's residual.
+static inline float energy(const float *a, const float *b)
+{
+	v4f s[4] = {{0}, {0}, {0}, {0}};
+	for (size_t i = 0; i < FRAMES; i += 16)
+		for (int u = 0; u < 4; u++) {
+			v4f x = v4f_at(a + i + 4 * u), y = v4f_at(b + i + 4 * u);
+			s[u] += x * x + y * y;
+		}
+	return v4f_sum4(s[0], s[1], s[2], s[3]);
+}
+
+// The oracle's sums for one source: Σ rest·contribution and Σ contribution², both channels.
+static inline void correlate(const float *rl, const float *rr, const float *cl, const float *cr, float *xy_out, float *xx_out)
+{
+	v4f xy[4] = {{0}, {0}, {0}, {0}}, xx[4] = {{0}, {0}, {0}, {0}};
+	for (size_t i = 0; i < FRAMES; i += 16)
+		for (int u = 0; u < 4; u++) {
+			v4f a = v4f_at(rl + i + 4 * u), b = v4f_at(rr + i + 4 * u), c = v4f_at(cl + i + 4 * u), d = v4f_at(cr + i + 4 * u);
+			xy[u] += a * c + b * d;
+			xx[u] += c * c + d * d;
+		}
+	*xy_out = v4f_sum4(xy[0], xy[1], xy[2], xy[3]);
+	*xx_out = v4f_sum4(xx[0], xx[1], xx[2], xx[3]);
+}
+#else
+static inline float energy(const float *a, const float *b)
+{
+	float s = 0;
+	for (size_t i = 0; i < FRAMES; i++)
+		s += a[i] * a[i] + b[i] * b[i];
+	return s;
+}
+static inline void correlate(const float *rl, const float *rr, const float *cl, const float *cr, float *xy_out, float *xx_out)
+{
+	float xy = 0, xx = 0;
+	for (size_t i = 0; i < FRAMES; i++) {
+		xy += rl[i] * cl[i] + rr[i] * cr[i];
+		xx += cl[i] * cl[i] + cr[i] * cr[i];
+	}
+	*xy_out = xy;
+	*xx_out = xx;
+}
+#endif
+
+// The largest |sample|. A running maximum is a chain like a sum is, so: 16 of them, side by side
+// (the result is the same whatever the order).
+static inline float peak_of(const float *restrict a, float peak)
+{
+	float lane[16] = {0};
+	for (size_t i = 0; i + 16 <= FRAMES; i += 16)
+		for (size_t j = 0; j < 16; j++) {
+			float v = fabsf(a[i + j]);
+			lane[j] = v > lane[j] ? v : lane[j];
+		}
+	for (size_t i = FRAMES - FRAMES % 16; i < FRAMES; i++) {
+		float v = fabsf(a[i]);
+		peak = v > peak ? v : peak;
+	}
+	for (size_t j = 0; j < 16; j++)
+		peak = lane[j] > peak ? lane[j] : peak;
+	return peak;
+}
+
 static struct ats_slot *ats_for(struct fdr_mixer *m, obs_source_t *src)
 {
 	struct ats_slot *free_slot = NULL;
@@ -304,11 +396,8 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 			// Held back: added to a candidate, decided after the loop.
 			obs_source_get_audio_mix(s, &mix);
 			const float *il = mix.output[m->mix_idx].data[0], *ir = mix.output[m->mix_idx].data[1];
-			float *cl = cand[in_a ? 0 : 1][0], *cr = cand[in_a ? 0 : 1][1];
-			for (size_t i = 0; i < FRAMES; i++) {
-				cl[i] += il[i];
-				cr[i] += ir[i];
-			}
+			add_into(cand[in_a ? 0 : 1][0], il);
+			add_into(cand[in_a ? 0 : 1][1], ir);
 			side[k] = in_a ? 0 : 1;
 			contrib[k][0] = il;
 			contrib[k][1] = ir;
@@ -339,10 +428,8 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 			c_l = f_l;
 			c_r = f_r;
 		}
-		for (size_t i = 0; i < FRAMES; i++) {
-			dst_l[i] += c_l[i];
-			dst_r[i] += c_r[i];
-		}
+		add_into(dst_l, c_l);
+		add_into(dst_r, c_r);
 		contrib[k][0] = c_l;
 		contrib[k][1] = c_r;
 		inc[k] = true;
@@ -369,11 +456,8 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 				m->st.gated_new[k]++;
 				continue;
 			}
-			float *dst_l = acc[e->fader][0], *dst_r = acc[e->fader][1];
-			for (size_t i = 0; i < FRAMES; i++) {
-				dst_l[i] += contrib[k][0][i];
-				dst_r[i] += contrib[k][1][i];
-			}
+			add_into(acc[e->fader][0], contrib[k][0]);
+			add_into(acc[e->fader][1], contrib[k][1]);
 			inc[k] = true;
 			m->st.included[k]++;
 			why[k] = win ? 'B' : 'A';
@@ -385,21 +469,21 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 	// Everything else = the unclamped track − Σ faders.
 	float *rest_l = acc[n_wire][0], *rest_r = acc[n_wire][1];
 	const float *trk_l = (const float *)data->data[0], *trk_r = (const float *)data->data[1];
-	float track_peak = 0;
-	double rest_sq = 0;
-	for (size_t i = 0; i < FRAMES; i++) {
-		float sl = 0, sr = 0;
-		for (int f = 0; f < n_wire; f++) {
-			sl += acc[f][0][i];
-			sr += acc[f][1][i];
-		}
-		rest_l[i] = trk_l[i] - sl;
-		rest_r[i] = trk_r[i] - sr;
-		float pl = fabsf(trk_l[i]), pr = fabsf(trk_r[i]);
-		track_peak = pl > track_peak ? pl : track_peak;
-		track_peak = pr > track_peak ? pr : track_peak;
-		rest_sq += (double)rest_l[i] * rest_l[i] + (double)rest_r[i] * rest_r[i];
+	// Σ faders first, fader by fader in the same order as before (so every sample rounds the same
+	// way), then the subtraction: the buffers are walked one at a time instead of across.
+	static float sum[CH][FRAMES];
+	for (int c = 0; c < CH; c++) {
+		float *restrict sm = sum[c];
+		const float *restrict trk = c ? trk_r : trk_l;
+		float *restrict rest = c ? rest_r : rest_l;
+		memset(sm, 0, sizeof(sum[c]));
+		for (int f = 0; f < n_wire; f++)
+			add_into(sm, acc[f][c]);
+		for (size_t i = 0; i < FRAMES; i++)
+			rest[i] = trk[i] - sm[i];
 	}
+	float track_peak = peak_of(trk_r, peak_of(trk_l, 0));
+	double rest_sq = energy(rest_l, rest_r);
 
 	if (m->dbg_until && ts < m->dbg_until) {
 		why[n < MAX_ENTRIES ? n : MAX_ENTRIES - 1] = 0;
@@ -419,19 +503,16 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 		yy = 0;
 		oracle_ticks = -1; // ++ below makes it 0
 	}
-	// Oracle sums for every included source, every other tick (the window is 0.5 s; half the
-	// samples are plenty of evidence and it halves the per-tick cost).
+	// Oracle sums for every included source on every other tick (the window is 0.5 s; half the
+	// samples are plenty of evidence and it halves the cost). Odd sources on one tick, even ones
+	// on the next, so every tick does the same amount of work.
 	for (int k = 0; k < n; k++) {
-		if (!inc[k] || (m->st.ticks & 1) || oracle_hold)
+		if (!inc[k] || ((oracle_ticks + k) & 1) || oracle_hold)
 			continue;
 		struct entry *e = &snap->e[k];
 		// Float sums within the tick (1024 samples), accumulated in double across the window.
-		float xy = 0, xx = 0;
-		const float *cl = contrib[k][0], *cr = contrib[k][1];
-		for (size_t i = 0; i < FRAMES; i++) {
-			xy += rest_l[i] * cl[i] + rest_r[i] * cr[i];
-			xx += cl[i] * cl[i] + cr[i] * cr[i];
-		}
+		float xy, xx;
+		correlate(rest_l, rest_r, contrib[k][0], contrib[k][1], &xy, &xx);
 		e->xy += xy;
 		e->xx += xx;
 	}
@@ -495,11 +576,8 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 		for (int f = 0; f < n_wire; f++) {
 			if (!(snap->e[k].extra & (1u << f)))
 				continue;
-			float *dst_l = acc[f][0], *dst_r = acc[f][1];
-			for (size_t i = 0; i < FRAMES; i++) {
-				dst_l[i] += contrib[k][0][i];
-				dst_r[i] += contrib[k][1][i];
-			}
+			add_into(acc[f][0], contrib[k][0]);
+			add_into(acc[f][1], contrib[k][1]);
 		}
 	}
 
@@ -507,10 +585,7 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 	m->st.n += FRAMES * CH;
 	m->st.rest_sq += rest_sq;
 	for (int f = 0; f < n_wire; f++) {
-		double sq = 0;
-		for (size_t i = 0; i < FRAMES; i++)
-			sq += (double)acc[f][0][i] * acc[f][0][i] + (double)acc[f][1][i] * acc[f][1][i];
-		m->st.fader_sq[f] += sq;
+		m->st.fader_sq[f] += energy(acc[f][0], acc[f][1]);
 	}
 
 	// Interleave and hand over: faders 0..n_wire-1, then Everything else.
