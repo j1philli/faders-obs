@@ -163,6 +163,53 @@ static const char *dialog(void)
 	calldata_free(&cd);
 	return dialog_rows;
 }
+// OBS's UI task handler, as the real app has it (OBSApp.cpp ui_task_handler: a Qt AutoConnection):
+// a task queued from the UI thread (this test's main thread) runs right away; one from another
+// thread waits for the UI thread's next turn (pump_ui).
+static pthread_t ui_thread;
+static pthread_mutex_t ui_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct {
+	obs_task_t task;
+	void *param;
+} ui_queue[256];
+static int ui_queued;
+static void ui_task_handler(obs_task_t task, void *param, bool wait)
+{
+	if (pthread_equal(pthread_self(), ui_thread)) {
+		task(param);
+		return;
+	}
+	pthread_mutex_lock(&ui_mu);
+	if (ui_queued < (int)(sizeof(ui_queue) / sizeof(*ui_queue)))
+		ui_queue[ui_queued++] = (typeof(ui_queue[0])){task, param};
+	pthread_mutex_unlock(&ui_mu);
+	(void)wait;
+}
+static void pump_ui(void)
+{
+	for (;;) {
+		pthread_mutex_lock(&ui_mu);
+		if (!ui_queued) {
+			pthread_mutex_unlock(&ui_mu);
+			return;
+		}
+		typeof(ui_queue[0]) t = ui_queue[0];
+		memmove(ui_queue, ui_queue + 1, sizeof(ui_queue[0]) * (size_t)--ui_queued);
+		pthread_mutex_unlock(&ui_mu);
+		t.task(t.param);
+	}
+}
+static long dialog_redraws(void)
+{
+	calldata_t cd = {0};
+	call("faders_dialog_redraws", &cd);
+	long n = (long)calldata_int(&cd, "n");
+	calldata_free(&cd);
+	return n;
+}
+// Times the window was rebuilt while OBS was still applying a dropdown change (the widget's own
+// signal): OBS 33 crashed on that. Summed over every dialog_pick.
+static long redraws_inside_update;
 // Pick a choice in one dropdown, by its visible text, like a click.
 static bool dialog_pick(const char *key, const char *choice)
 {
@@ -171,8 +218,20 @@ static bool dialog_pick(const char *key, const char *choice)
 	calldata_set_string(&cd, "choice", choice);
 	call("faders_dialog_set", &cd);
 	bool ok = calldata_bool(&cd, "ok");
+	redraws_inside_update += (long)calldata_int(&cd, "redraws_during_update");
 	calldata_free(&cd);
 	return ok;
+}
+// After a pick: wait (pumping the UI thread) up to 2 s for the window's redraw. Whether it came.
+static bool redrawn_since(long before)
+{
+	for (int i = 0; i < 100; i++) {
+		pump_ui();
+		if (dialog_redraws() > before)
+			return true;
+		os_sleep_ms(20);
+	}
+	return false;
 }
 // The key of the row currently showing `shown` (from the last dialog()), or "".
 static const char *dialog_key_showing(const char *shown)
@@ -301,6 +360,7 @@ int main(int argc, char **argv)
 	char config_dir[512];
 	const char *tmp = getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp";
 	snprintf(config_dir, sizeof(config_dir), "%s/faders-mixtest-config", tmp);
+	ui_thread = pthread_self();
 	if (!obs_startup("en-US", config_dir, NULL)) {
 		fprintf(stderr, "obs_startup failed\n");
 		return 1;
@@ -311,6 +371,7 @@ int main(int argc, char **argv)
 		.output_format = VIDEO_FORMAT_NV12, .colorspace = VIDEO_CS_709, .range = VIDEO_RANGE_PARTIAL,
 		.scale_type = OBS_SCALE_BICUBIC, .gpu_conversion = true,
 	};
+	obs_set_ui_task_handler(ui_task_handler);
 	if (obs_reset_video(&ovi) != OBS_VIDEO_SUCCESS) {
 		fprintf(stderr, "obs_reset_video failed\n");
 		return 1;
@@ -511,19 +572,28 @@ int main(int argc, char **argv)
 			strstr(rows, "add:0\t \tAdd a source or track…\t") && strstr(rows, "OBS Track 2") && !strstr(rows, "OBS Track 1") && !strstr(rows, "Auto") && strstr(rows, "rest_info\tEverything else: extra");
 	result(laid_out, "6f dialog: a block per fader, sources as dropdowns", "%s", laid_out ? "Voice/Game/Music/Discord each list their source and an Add row; extra is under Everything else; no Auto" : rows);
 	// Add a source to a fader, then take it off again, by picking in the dropdowns.
+	long redraws_before_add = dialog_redraws();
 	bool picked = dialog_pick("add:0", "extra");
+	bool redrawn_after_add = redrawn_since(redraws_before_add);
 	window(800, 600);
 	double voice_plus = fader_rms("Voice"), rest_added = rest_dbfs();
 	dialog();
 	char extra_key[32];
 	snprintf(extra_key, sizeof(extra_key), "%s", dialog_key_showing("extra"));
 	bool row_shown = strncmp(extra_key, "row:", 4) == 0 && !strstr(dialog_rows, "Everything else: extra");
+	long redraws_before_remove = dialog_redraws();
 	bool removed = dialog_pick(extra_key, "Remove from Voice");
+	bool redrawn_after_remove = redrawn_since(redraws_before_remove);
 	window(800, 600);
 	result(picked && row_shown && removed && close_to(voice_plus, sqrt(R_VOICE * R_VOICE + R_EXTRA * R_EXTRA), 0.03) && rest_added < -60.0 && close_to(fader_rms("Voice"), R_VOICE, 0.03) && close_to(rest_rms(), R_EXTRA, 0.03) &&
 		       strstr(dialog(), "Everything else: extra"),
 	       "6g dialog: add a source to a fader, then remove it", "added: Voice %.4f (want %.4f), rest %.1f dBFS, row %s; removed: Voice %.4f, rest %.4f (want %.4f)", voice_plus, sqrt(R_VOICE * R_VOICE + R_EXTRA * R_EXTRA), rest_added,
 	       extra_key, fader_rms("Voice"), rest_rms(), R_EXTRA);
+	// OBS applies a dropdown change by calling the plugin from inside the dropdown's own signal. A
+	// window rebuilt right there deletes that dropdown under OBS, which then crashes (OBS 33,
+	// "Remove from …"). The rebuild must come after, on the UI thread's next turn.
+	result(redraws_inside_update == 0 && redrawn_after_add && redrawn_after_remove, "6g2 dialog rebuilds after a change, never during it",
+	       "rebuilt during the change %ld time(s) (want 0); rebuilt afterwards: add %d, remove %d", redraws_inside_update, redrawn_after_add, redrawn_after_remove);
 	// A track goes on a fader the same way, and carries everything ticked for it: a source that
 	// was taken off a fader (extra) and one that has a fader of its own (game, now on both).
 	obs_source_set_audio_mixers(extra, 1 | 4);

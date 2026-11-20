@@ -701,6 +701,31 @@ static uint64_t shown_fingerprint;
 static uint64_t last_check_ns, last_refresh_ns;
 static bool refresh_queued;
 
+// A change made in the window itself (a dropdown, the fader list) needs new rows. OBS applies
+// that change by calling src_update from inside the widget's own signal, on the UI thread. Asking
+// for the properties again right there makes OBS rebuild the window on the spot, deleting the
+// widget whose signal is still running: OBS then crashes on its way back out (picking "Remove
+// from …" crashed OBS 33 this way). So src_update only raises this flag; the next graphics tick
+// queues the redraw onto the UI thread, which runs it once the click has been handled. (A UI
+// task queued from the UI thread itself would run immediately, so it has to come from another
+// thread.)
+static volatile bool redraw_wanted;
+static long dialog_redraws; // test hook: update_properties signals seen
+
+static void redraw_window(void *unused)
+{
+	UNUSED_PARAMETER(unused);
+	if (settings_source)
+		obs_source_update_properties(settings_source);
+}
+
+static void count_redraw(void *unused, calldata_t *cd)
+{
+	UNUSED_PARAMETER(unused);
+	UNUSED_PARAMETER(cd);
+	os_atomic_inc_long(&dialog_redraws);
+}
+
 // UI thread: remember who the key belongs to (so the window can say so while offline), then
 // redraw an open window.
 static void refresh_window(void *unused)
@@ -731,6 +756,8 @@ static void watch_status(void *unused, float seconds)
 {
 	UNUSED_PARAMETER(unused);
 	UNUSED_PARAMETER(seconds);
+	if (os_atomic_exchange_bool(&redraw_wanted, false))
+		obs_queue_task(OBS_TASK_UI, redraw_window, NULL, false);
 	uint64_t now = os_gettime_ns();
 	if (now - last_check_ns < 500000000ULL || refresh_queued)
 		return;
@@ -1245,9 +1272,10 @@ static void src_update(void *data, obs_data_t *settings)
 	pthread_mutex_unlock(&uplink_mu);
 	if (!live)
 		apply(settings);
-	// An open dialog redraws with the new rows (it asks for the properties again).
-	if ((reassigned || renamed) && settings_source)
-		obs_source_update_properties(settings_source);
+	// An open dialog redraws with the new rows, once OBS has finished handling the change (see
+	// redraw_wanted: never from in here).
+	if (reassigned || renamed)
+		os_atomic_set_bool(&redraw_wanted, true);
 }
 
 static struct obs_source_info settings_source_info = {
@@ -1443,10 +1471,19 @@ static void proc_dialog_set(void *unused, calldata_t *cd)
 		obs_data_set_string(change, key, obs_property_list_item_string(p, i));
 	}
 	obs_properties_destroy(props);
+	long before = os_atomic_load_long(&dialog_redraws);
 	if (change)
 		obs_source_update(settings_source, change);
 	calldata_set_bool(cd, "ok", change != NULL);
+	// How often the window was told to rebuild while OBS was still applying the change: must be 0.
+	calldata_set_int(cd, "redraws_during_update", os_atomic_load_long(&dialog_redraws) - before);
 	obs_data_release(change);
+}
+
+static void proc_dialog_redraws(void *unused, calldata_t *cd)
+{
+	UNUSED_PARAMETER(unused);
+	calldata_set_int(cd, "n", os_atomic_load_long(&dialog_redraws));
 }
 
 static void proc_status(void *unused, calldata_t *cd)
@@ -1500,6 +1537,7 @@ bool obs_module_load(void)
 
 	settings_source = obs_source_create_private(SOURCE_ID, "Faders", saved);
 	obs_data_release(saved);
+	signal_handler_connect(obs_source_get_signal_handler(settings_source), "update_properties", count_redraw, NULL);
 
 	proc_handler_t *ph = obs_get_proc_handler();
 	// Headless tests have no streaming output: point the streamed-track check at a track directly.
@@ -1509,7 +1547,8 @@ bool obs_module_load(void)
 	proc_handler_add(ph, "void faders_assign_track(in int track, in string fader)", proc_assign_track, NULL);
 	proc_handler_add(ph, "void faders_status(out string status)", proc_status, NULL);
 	proc_handler_add(ph, "void faders_dialog(out string rows)", proc_dialog, NULL);
-	proc_handler_add(ph, "void faders_dialog_set(in string key, in string choice, out bool ok)", proc_dialog_set, NULL);
+	proc_handler_add(ph, "void faders_dialog_set(in string key, in string choice, out bool ok, out int redraws_during_update)", proc_dialog_set, NULL);
+	proc_handler_add(ph, "void faders_dialog_redraws(out int n)", proc_dialog_redraws, NULL);
 	proc_handler_add(ph, "void faders_mixer_stats(out string json)", proc_mixer_stats, NULL);
 	proc_handler_add(ph, "void faders_rebuild()", proc_rebuild, NULL);
 	proc_handler_add(ph, "void faders_transition_duration(in int ms)", proc_transition_duration, NULL);
@@ -1525,6 +1564,8 @@ bool obs_module_load(void)
 void obs_module_unload(void)
 {
 	obs_remove_tick_callback(watch_status, NULL);
+	if (settings_source)
+		signal_handler_disconnect(obs_source_get_signal_handler(settings_source), "update_properties", count_redraw, NULL);
 	apply(NULL);
 	obs_source_release(settings_source);
 	settings_source = NULL;
