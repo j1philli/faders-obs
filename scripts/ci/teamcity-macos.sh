@@ -29,6 +29,7 @@ npm ci --no-audit --no-fund
 
 node test/fader-names.mjs
 node test/update-notice.mjs
+node test/resume-backlog.mjs
 
 node test/mock-hub.mjs --port "$PORT" > hub.log 2>&1 &
 HUB=$!

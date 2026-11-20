@@ -89,7 +89,7 @@ struct fdr_uplink {
 	uint32_t chunk_n;
 	struct chunk backlog[BACKLOG_CHUNKS];
 	int64_t last_sent_seq;
-	uint32_t conn_gen; // bumped on every (re)connect; stale flushes don't overwrite progress
+	uint32_t conn_gen; // bumped on every (re)connect and resume; stale flushes don't overwrite progress
 
 	fdr_ws_t *ws;
 	bool connected;
@@ -298,6 +298,14 @@ static void on_text(void *param, const char *text)
 			pthread_mutex_lock(&u->mu);
 			if ((u->listeners == 0) != (listeners == 0))
 				blog(LOG_INFO, "[faders] %d listener(s): %s uplink", listeners, listeners ? "resuming" : "pausing");
+			if (u->listeners == 0 && listeners > 0) {
+				// While we were paused the hub may have hibernated and lost its 60 s ring. Offer
+				// the whole backlog again, as on connect (the hub drops chunks it still holds), or
+				// a viewer arriving 10–30 s after the last one left gets only the pause's worth of
+				// history, too little for auto-sync to find a YouTube stream's delay.
+				u->last_sent_seq = -1;
+				u->conn_gen++;
+			}
 			u->listeners = listeners;
 			pthread_mutex_unlock(&u->mu);
 		}

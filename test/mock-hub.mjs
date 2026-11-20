@@ -5,6 +5,7 @@
 //                      {"type":"quality","kbps":N} on connect when --kbps is given
 //                      and {"type":"update","latest":V} on connect when --update is given
 //   /listen/<channel>  viewers: {"type":"backlog"} + up to 60 s of chunks, {"type":"live"}, then live
+//   POST /forget       {"channel":…}: drop that channel's ring, like a hub object that hibernated
 //
 //   node test/mock-hub.mjs [--port 8787] [--token dev-token] [--kbps 256] [--update 0.9.0]
 import { createServer } from "node:http";
@@ -31,6 +32,15 @@ const server = createServer(async (req, res) => {
     c.names = names;
     c.ingest?.send(JSON.stringify({ type: "fader-names", names }));
     for (const ws of c.listeners) ws.send(JSON.stringify({ type: "fader-names", names }));
+    return res.end("ok");
+  }
+  // Test-only: forget a channel's ring, as a hibernated hub object does while nobody listens.
+  if (req.url === "/forget" && req.method === "POST") {
+    let body = "";
+    for await (const part of req) body += part;
+    const c = chan(JSON.parse(body).channel);
+    c.ring = [];
+    c.lastSeq = -1;
     return res.end("ok");
   }
   if (req.url === "/health") return res.end("ok");
