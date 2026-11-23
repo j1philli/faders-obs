@@ -4,7 +4,7 @@
 # Dependencies live in .deps/ (scripts/fetch-deps.sh on macOS, scripts/fetch-deps-windows.ps1 on
 # Windows, scripts/cross-windows.sh to cross-compile the Windows DLL from macOS).
 cmake_minimum_required(VERSION 3.24)
-project(faders VERSION 0.3.1 LANGUAGES C)
+project(faders VERSION 0.4.0 LANGUAGES C)
 # Plugin Manager metadata (OBS 32+ reads data/manifest.json): written from the project version so
 # it can't drift; committed so the installers, which package data/, always include it.
 configure_file("${CMAKE_SOURCE_DIR}/cmake/manifest.json.in" "${CMAKE_SOURCE_DIR}/data/manifest.json" @ONLY NEWLINE_STYLE UNIX)
@@ -20,7 +20,7 @@ set(GEN "${CMAKE_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${GEN}")
 file(WRITE "${GEN}/obsconfig.h" "#pragma once\n#define OBS_RELEASE_CANDIDATE 0\n#define OBS_BETA 0\n")
 
-set(FADERS_SOURCES src/plugin-main.c src/uplink.c)
+set(FADERS_SOURCES src/plugin-main.c src/uplink.c src/mixer.c)
 set(OBS_INCLUDES "${GEN}" "${OBS_SRC}/libobs" "${OBS_SRC}/frontend/api" "${SIMDE_INCLUDE}")
 
 if(APPLE)
@@ -52,6 +52,8 @@ if(APPLE)
   set(PLUGIN_BIN "$<TARGET_BUNDLE_DIR:faders>/Contents/MacOS/faders")
   set(PLUGIN_DATA "$<TARGET_BUNDLE_DIR:faders>/Contents/Resources")
   set(GRAPHICS_MODULE "${FRAMEWORKS}/libobs-opengl.dylib")
+  set(OBS_TRANSITIONS_BIN "${OBS_APP}/Contents/PlugIns/obs-transitions.plugin/Contents/MacOS/obs-transitions")
+  set(OBS_TRANSITIONS_DATA "${OBS_APP}/Contents/PlugIns/obs-transitions.plugin/Contents/Resources")
 
 elseif(WIN32)
   # Import libraries generated from the official OBS release DLLs (no libobs build needed).
@@ -82,6 +84,8 @@ elseif(WIN32)
   set(PLUGIN_BIN "$<TARGET_FILE:faders>")
   set(PLUGIN_DATA "${CMAKE_BINARY_DIR}/data/obs-plugins/faders")
   set(GRAPHICS_MODULE "libobs-d3d11")
+  set(OBS_TRANSITIONS_BIN "")
+  set(OBS_TRANSITIONS_DATA "")
 else()
   message(FATAL_ERROR "Linux is not supported yet (needs a libcurl WebSocket transport in src/ws-curl.c)")
 endif()
@@ -92,7 +96,7 @@ if(NOT MSVC)
   target_compile_options(faders PRIVATE -Wall -Wno-unused-parameter $<$<COMPILE_LANGUAGE:C>:-Wno-deprecated-declarations>)
 endif()
 
-# Headless test host: real libobs, no GUI; plays WAVs into tracks 2/3/4 and loads the plugin.
+# Headless test host: real libobs, no GUI; plays WAVs as sources on the streamed track and loads the plugin.
 add_executable(faders-headless test/headless.c)
 target_include_directories(faders-headless PRIVATE ${OBS_INCLUDES})
 target_compile_definitions(faders-headless PRIVATE FADERS_PLUGIN_BIN="${PLUGIN_BIN}" FADERS_PLUGIN_DATA="${PLUGIN_DATA}" FADERS_GRAPHICS_MODULE="${GRAPHICS_MODULE}")
@@ -107,3 +111,41 @@ else()
   endif()
 endif()
 add_dependencies(faders-headless faders)
+
+# Transport shutdown: no callback after fdr_ws_destroy() returns (test/wstest.c, with test/ws-flood.mjs).
+if(APPLE)
+  add_executable(faders-wstest test/wstest.c src/ws-apple.m)
+  target_compile_definitions(faders-wstest PRIVATE FDR_VERSION_STR="${PROJECT_VERSION}")
+  target_link_libraries(faders-wstest PRIVATE "-framework Foundation")
+endif()
+
+# Mixer check: proves the libobs behaviour the virtual mixer relies on (test/mixcheck.c), no plugin.
+add_executable(faders-mixcheck test/mixcheck.c)
+target_include_directories(faders-mixcheck PRIVATE ${OBS_INCLUDES})
+target_compile_definitions(faders-mixcheck PRIVATE FADERS_GRAPHICS_MODULE="${GRAPHICS_MODULE}" FADERS_OBS_TRANSITIONS_BIN="${OBS_TRANSITIONS_BIN}" FADERS_OBS_TRANSITIONS_DATA="${OBS_TRANSITIONS_DATA}")
+if(APPLE)
+  target_link_options(faders-mixcheck PRIVATE "-F${FRAMEWORKS}" "-Wl,-rpath,${FRAMEWORKS}")
+  target_link_libraries(faders-mixcheck PRIVATE "-framework libobs")
+else()
+  target_link_libraries(faders-mixcheck PRIVATE ${OBS_IMPORT_LIBS})
+  if(NOT MSVC)
+    target_link_options(faders-mixcheck PRIVATE -static-libgcc -static)
+    target_compile_options(faders-mixcheck PRIVATE ${MINGW_SHIM})
+  endif()
+endif()
+
+# Mixer test: the virtual mixer through the real plugin (test/mixtest.c).
+add_executable(faders-mixtest test/mixtest.c)
+target_include_directories(faders-mixtest PRIVATE ${OBS_INCLUDES})
+target_compile_definitions(faders-mixtest PRIVATE FADERS_PLUGIN_BIN="${PLUGIN_BIN}" FADERS_PLUGIN_DATA="${PLUGIN_DATA}" FADERS_GRAPHICS_MODULE="${GRAPHICS_MODULE}" FADERS_OBS_TRANSITIONS_BIN="${OBS_TRANSITIONS_BIN}" FADERS_OBS_TRANSITIONS_DATA="${OBS_TRANSITIONS_DATA}")
+if(APPLE)
+  target_link_options(faders-mixtest PRIVATE "-F${FRAMEWORKS}" "-Wl,-rpath,${FRAMEWORKS}")
+  target_link_libraries(faders-mixtest PRIVATE "-framework libobs")
+else()
+  target_link_libraries(faders-mixtest PRIVATE ${OBS_IMPORT_LIBS})
+  if(NOT MSVC)
+    target_link_options(faders-mixtest PRIVATE -static-libgcc -static)
+    target_compile_options(faders-mixtest PRIVATE ${MINGW_SHIM})
+  endif()
+endif()
+add_dependencies(faders-mixtest faders)

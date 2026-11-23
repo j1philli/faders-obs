@@ -9,10 +9,18 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 // Headless test host for the Faders OBS plugin: real libobs (from OBS.app), no GUI.
-// Plays three WAV files into OBS mixer tracks 2/3/4, loads faders.plugin, configures it via
-// its "faders_configure" procedure, and prints the plugin's status every few seconds.
+// Plays three WAV files as sources on the streamed track (Track 1, or FADERS_STREAM_TRACK),
+// loads faders.plugin, configures it through its procedures (faders Voice/Game/Music, one source
+// each), and prints the plugin's status every few seconds. FADERS_EXTRA_WAV adds a fourth source
+// left unassigned, so "Everything else" carries it.
 //
 //   faders-headless <server> <key> <voice.wav> <game.wav> <music.wav> [seconds]
+//
+// Environment, for the stream-track checks (there is no streaming output here):
+//   FADERS_STREAM_TRACK=1   watch track 1 as the streamed track; the three sources also go on it
+//   FADERS_OFF_STREAM=game  ...except this one (voice|game|music): a track-setup mistake
+//   FADERS_EXTRA_WAV=path   a fourth source on the streamed track only (played from its midpoint,
+//                           so it doesn't correlate with the stem it may be a copy of)
 #include <obs.h>
 #include <obs-module.h>
 #include <util/platform.h>
@@ -90,6 +98,7 @@ static void *wav_create(obs_data_t *settings, obs_source_t *source)
 		fprintf(stderr, "cannot read %s\n", obs_data_get_string(settings, "path"));
 		exit(2);
 	}
+	w->pos = (size_t)(obs_data_get_double(settings, "start") * (double)w->count) % (w->count ? w->count : 1);
 	pthread_create(&w->thread, NULL, wav_thread, w);
 	return w;
 }
@@ -110,7 +119,7 @@ static struct obs_source_info wav_info = {
 	.destroy = wav_destroy,
 };
 
-// Debug: RMS of what reaches each mixer track (tracks 2-4), to tell host problems from plugin ones.
+// Debug: RMS of what reaches the streamed track, to tell host problems from plugin ones.
 static double track_rms[6];
 static void on_track_audio(void *param, size_t mix_idx, struct audio_data *data)
 {
@@ -209,21 +218,34 @@ int main(int argc, char **argv)
 	}
 	obs_register_source(&wav_info);
 
-	// Voice → track 2, game → track 3, music → track 4 (mixer bit = track - 1).
-	obs_source_t *srcs[3];
+	// Every source is on the streamed track only, as a real setup has them; no Faders tracks.
+	int stream_track = getenv("FADERS_STREAM_TRACK") ? atoi(getenv("FADERS_STREAM_TRACK")) : 1;
+	if (stream_track < 1 || stream_track > 6)
+		stream_track = 1;
+	obs_source_t *srcs[4] = {0};
+	int n_srcs = 3;
+	static const char *names[] = {"voice", "game", "music"};
 	for (int i = 0; i < 3; i++) {
 		obs_data_t *s = obs_data_create();
 		obs_data_set_string(s, "path", argv[3 + i]);
-		static const char *names[] = {"voice", "game", "music"};
 		srcs[i] = obs_source_create("faders_test_wav", names[i], s, NULL);
 		obs_data_release(s);
-		obs_source_set_audio_mixers(srcs[i], 1u << (i + 1));
+		obs_source_set_audio_mixers(srcs[i], 1u << (stream_track - 1));
 		obs_set_output_source(1 + i, srcs[i]); // output channels make the sources active
+	}
+	if (getenv("FADERS_EXTRA_WAV")) {
+		obs_data_t *s = obs_data_create();
+		obs_data_set_string(s, "path", getenv("FADERS_EXTRA_WAV"));
+		obs_data_set_double(s, "start", 0.5);
+		srcs[3] = obs_source_create("faders_test_wav", "extra", s, NULL);
+		obs_data_release(s);
+		obs_source_set_audio_mixers(srcs[3], 1u << (stream_track - 1));
+		obs_set_output_source(4, srcs[3]);
+		n_srcs = 4;
 	}
 
 	struct audio_convert_info dbg = {.samples_per_sec = 48000, .format = AUDIO_FORMAT_FLOAT, .speakers = SPEAKERS_MONO};
-	for (size_t m = 1; m <= 3; m++)
-		obs_add_raw_audio_callback(m, &dbg, on_track_audio, NULL);
+	obs_add_raw_audio_callback((size_t)(stream_track - 1), &dbg, on_track_audio, NULL);
 
 	obs_module_t *mod = NULL;
 	const char *bin = FADERS_PLUGIN_BIN;
@@ -233,36 +255,40 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	// No streaming output here: tell the plugin which track is the streamed one, then configure
+	// it and put each WAV source on its fader (the "extra" one stays in Everything else).
+	calldata_t wc = {0};
+	calldata_set_int(&wc, "track", stream_track);
+	proc_handler_call(obs_get_proc_handler(), "faders_watch_stream_track", &wc);
+	calldata_free(&wc);
 	calldata_t cd = {0};
 	calldata_set_string(&cd, "server", argv[1]);
 	calldata_set_string(&cd, "key", argv[2]);
-	calldata_set_int(&cd, "voice", 2);
-	calldata_set_int(&cd, "game", 3);
-	calldata_set_int(&cd, "music", 4);
+	calldata_set_string(&cd, "faders", "Voice,Game,Music");
 	calldata_set_bool(&cd, "only_live", false);
 	proc_handler_call(obs_get_proc_handler(), "faders_configure", &cd);
-	// FADERS_STREAM_TRACK=n: run the streamed-track silence check on track n (no streaming output here).
-	if (getenv("FADERS_STREAM_TRACK")) {
-		calldata_t wc = {0};
-		calldata_set_int(&wc, "track", atoi(getenv("FADERS_STREAM_TRACK")));
-		proc_handler_call(obs_get_proc_handler(), "faders_watch_stream_track", &wc);
-		calldata_free(&wc);
-	}
 	calldata_free(&cd);
+	static const char *faders[] = {"Voice", "Game", "Music"};
+	for (int i = 0; i < 3; i++) {
+		calldata_t ac = {0};
+		calldata_set_string(&ac, "source", names[i]);
+		calldata_set_string(&ac, "fader", faders[i]);
+		proc_handler_call(obs_get_proc_handler(), "faders_assign", &ac);
+		calldata_free(&ac);
+	}
 
 	for (int t = 0; t < seconds; t++) {
 		for (int tick = 0; tick < 10; tick++) { os_sleep_ms(100); pump_ui_tasks(); }
 		if (t % 3 == 2) {
 			calldata_t st = {0};
 			proc_handler_call(obs_get_proc_handler(), "faders_status", &st);
-			printf("[%2ds] %s  (track rms: 2=%.4f 3=%.4f 4=%.4f)\n", t + 1, calldata_string(&st, "status"), track_rms[1], track_rms[2], track_rms[3]);
-			printf("fader names: [%s] [%s] [%s]\n", calldata_string(&st, "voice"), calldata_string(&st, "game"), calldata_string(&st, "music"));
+			printf("[%2ds] %s  (streamed track rms: %.4f)\n", t + 1, calldata_string(&st, "status"), track_rms[stream_track - 1]);
 			fflush(stdout);
 			calldata_free(&st);
 		}
 	}
 
-	for (int i = 0; i < 3; i++) {
+	for (int i = 0; i < n_srcs; i++) {
 		obs_set_output_source(1 + i, NULL);
 		obs_source_release(srcs[i]);
 	}
