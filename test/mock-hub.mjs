@@ -7,6 +7,7 @@
 //                      {"type":"hello",…} on connect (channel = the path, --plan, --limit)
 //   /listen/<channel>  viewers: the plugin's {"type":"stems"} (if any), {"type":"backlog"} + up to
 //                      60 s of chunks, {"type":"live"}, then live
+//   POST /forget       {"channel":…}: drop that channel's ring, like a hub object that hibernated
 // Every text message from the plugin is logged ("plugin <channel>: ..."), for tests to grep.
 //
 //   node test/mock-hub.mjs [--port 8787] [--token dev-token] [--kbps 256] [--max-stems 4] [--update 0.9.0] [--plan free] [--limit 25]
@@ -25,6 +26,15 @@ const chan = (name) => {
 const notify = (c) => c.ingest?.send(JSON.stringify({ type: "listeners", n: c.listeners.size }));
 
 const server = createServer(async (req, res) => {
+  // Test-only: forget a channel's ring, as a hibernated hub object does while nobody listens.
+  if (req.url === "/forget" && req.method === "POST") {
+    let body = "";
+    for await (const part of req) body += part;
+    const c = chan(JSON.parse(body).channel);
+    c.ring = [];
+    c.lastSeq = -1;
+    return res.end("ok");
+  }
   if (req.url === "/health") return res.end("ok");
   res.writeHead(404).end();
 });

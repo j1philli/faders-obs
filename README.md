@@ -185,3 +185,5 @@ Bundled: Opus (BSD-3-Clause). The Faders hub, website and browser extension are 
 programs that talk to this plugin over the network protocol in `PROTOCOL.md`.
 
 Update notice regression test (after building): `node test/update-notice.mjs`. It checks that the hub's "newer release" notice is saved locally, so Tools → Faders shows it after the stream ends, and that a malformed version is ignored.
+
+Resume regression test (after building): `node test/resume-backlog.mjs`. It pauses the uplink (no listeners), has the mock hub forget its ring as a hibernated hub object does, and checks that the next listener gets the plugin's backlog from before the pause, which auto-sync needs to find a YouTube stream's delay.
