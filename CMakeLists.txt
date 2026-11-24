@@ -119,6 +119,22 @@ if(APPLE)
   target_link_libraries(faders-wstest PRIVATE "-framework Foundation")
 endif()
 
+# Faders panel with OBS source states and an already-open properties window.
+add_executable(faders-panel-devstate test/panel-devstate.c)
+target_include_directories(faders-panel-devstate PRIVATE ${OBS_INCLUDES})
+target_compile_definitions(faders-panel-devstate PRIVATE FADERS_PLUGIN_BIN="${PLUGIN_BIN}" FADERS_PLUGIN_DATA="${PLUGIN_DATA}" FADERS_GRAPHICS_MODULE="${GRAPHICS_MODULE}")
+if(APPLE)
+  target_link_options(faders-panel-devstate PRIVATE "-F${FRAMEWORKS}" "-Wl,-rpath,${FRAMEWORKS}")
+  target_link_libraries(faders-panel-devstate PRIVATE "-framework libobs")
+else()
+  target_link_libraries(faders-panel-devstate PRIVATE ${OBS_IMPORT_LIBS})
+  if(NOT MSVC)
+    target_link_options(faders-panel-devstate PRIVATE -static-libgcc -static)
+    target_compile_options(faders-panel-devstate PRIVATE ${MINGW_SHIM})
+  endif()
+endif()
+add_dependencies(faders-panel-devstate faders)
+
 # Mixer check: proves the libobs behaviour the virtual mixer relies on (test/mixcheck.c), no plugin.
 add_executable(faders-mixcheck test/mixcheck.c)
 target_include_directories(faders-mixcheck PRIVATE ${OBS_INCLUDES})
