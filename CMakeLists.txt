@@ -135,7 +135,7 @@ else()
 endif()
 
 # Mixer test: the virtual mixer through the real plugin (test/mixtest.c).
-add_executable(faders-mixtest test/mixtest.c)
+add_executable(faders-mixtest test/mixtest.c test/panel-enumeration.c)
 target_include_directories(faders-mixtest PRIVATE ${OBS_INCLUDES})
 target_compile_definitions(faders-mixtest PRIVATE FADERS_PLUGIN_BIN="${PLUGIN_BIN}" FADERS_PLUGIN_DATA="${PLUGIN_DATA}" FADERS_GRAPHICS_MODULE="${GRAPHICS_MODULE}" FADERS_OBS_TRANSITIONS_BIN="${OBS_TRANSITIONS_BIN}" FADERS_OBS_TRANSITIONS_DATA="${OBS_TRANSITIONS_DATA}")
 if(APPLE)
@@ -149,3 +149,6 @@ else()
   endif()
 endif()
 add_dependencies(faders-mixtest faders)
+
+enable_testing()
+add_test(NAME panel-enumeration COMMAND faders-mixtest enumeration)
