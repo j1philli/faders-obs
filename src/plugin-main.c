@@ -821,8 +821,9 @@ static void src_defaults(obs_data_t *s)
 #define ITEM_SRC "s:"     // dropdown values: "s:<source uuid>", "t:<track 1-6>"
 #define ITEM_TRACK "t:"
 #define CHOICE_REMOVE "~remove"
-#define MAX_ITEMS 128
-#define MAX_DIALOG_ROWS 192
+// Leave room for every input the mixer can route, the tracks, and one add row per fader.
+#define MAX_ITEMS (FDR_MAX_AUDIO_SOURCES + MAX_AUDIO_MIXES)
+#define MAX_DIALOG_ROWS (MAX_ITEMS + FDR_MAX_FADERS)
 
 struct dialog_item {
 	char id[80];
@@ -862,7 +863,7 @@ static bool add_dialog_source(void *param, obs_source_t *s)
 {
 	struct dialog_model *m = param;
 	uint32_t flags = obs_source_get_output_flags(s);
-	if (!(flags & OBS_SOURCE_AUDIO) || (flags & OBS_SOURCE_COMPOSITE) || obs_source_get_type(s) != OBS_SOURCE_TYPE_INPUT || m->n_items >= MAX_ITEMS)
+	if (!(flags & OBS_SOURCE_AUDIO) || (flags & OBS_SOURCE_COMPOSITE) || obs_source_get_type(s) != OBS_SOURCE_TYPE_INPUT || m->n_items >= FDR_MAX_AUDIO_SOURCES)
 		return true;
 	struct dialog_item *it = &m->items[m->n_items++];
 	memset(it, 0, sizeof(*it));
