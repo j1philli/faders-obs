@@ -244,6 +244,21 @@ int main(int argc, char **argv)
 		n_srcs = 4;
 	}
 
+	// FADERS_MISMATCH_NAME: one more source with that name, put on Voice and included although it
+	// is in no output (the test hook), so the mixer reports it to the hub as a mismatch.
+	obs_source_t *mismatched = NULL;
+	if (getenv("FADERS_MISMATCH_NAME")) {
+		obs_data_t *s = obs_data_create();
+		obs_data_set_string(s, "path", argv[5]);
+		mismatched = obs_source_create("faders_test_wav", getenv("FADERS_MISMATCH_NAME"), s, NULL);
+		obs_data_release(s);
+		obs_source_set_audio_mixers(mismatched, 1u << (stream_track - 1));
+		obs_data_t *priv = obs_source_get_private_settings(mismatched);
+		obs_data_set_bool(priv, "faders_test_force", true);
+		obs_data_set_string(priv, "faders_fader", "Voice");
+		obs_data_release(priv);
+	}
+
 	struct audio_convert_info dbg = {.samples_per_sec = 48000, .format = AUDIO_FORMAT_FLOAT, .speakers = SPEAKERS_MONO};
 	obs_add_raw_audio_callback((size_t)(stream_track - 1), &dbg, on_track_audio, NULL);
 
@@ -292,6 +307,7 @@ int main(int argc, char **argv)
 		obs_set_output_source(1 + i, NULL);
 		obs_source_release(srcs[i]);
 	}
+	obs_source_release(mismatched);
 	obs_shutdown();
 	return 0;
 }

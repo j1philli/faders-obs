@@ -36,6 +36,7 @@ grep -E "^(PASS|FAIL|SKIP)" mixcheck.log
 # The hub's update notice is kept in the settings (test/update-notice.mjs runs its own mock hub).
 node test/update-notice.mjs
 node test/resume-backlog.mjs
+node test/status-name.mjs # a mismatched source's name reaches the hub as valid JSON and UTF-8
 
 # Transport shutdown: once fdr_ws_destroy() returns, no callback is running (test/wstest.c).
 node test/ws-flood.mjs --port "$((PORT + 4))" > ws-flood.log 2>&1 &
