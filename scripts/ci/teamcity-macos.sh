@@ -27,6 +27,8 @@ npm ci --no-audit --no-fund
 ./scripts/fetch-deps.sh
 ./scripts/build-macos.sh # universal plugin (arm64 + x86_64) and the arm64 headless host
 
+ctest --test-dir build -R panel-enumeration --output-on-failure
+
 # libobs behaviour the virtual mixer relies on (PROTOCOL.md "Virtual mixer"): every check must pass.
 build/faders-mixcheck > mixcheck.log 2>&1 || { grep -E "^(PASS|FAIL|SKIP)" mixcheck.log; echo "##teamcity[buildProblem description='faders-mixcheck: a libobs mixer assumption failed']"; exit 1; }
 grep -E "^(PASS|FAIL|SKIP)" mixcheck.log
