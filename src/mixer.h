@@ -31,6 +31,7 @@ typedef struct fdr_mixer fdr_mixer_t;
 // Test hook (private setting, bool): include the source even if the gate says no. Used to
 // inject a mismatch and watch the oracle drop it.
 #define FDR_FORCE_SETTING "faders_test_force"
+#define FDR_MAX_AUDIO_SOURCES 256
 #define FDR_MAX_FADERS (FDR_MAX_STEMS - 1)
 
 // Needs stereo 48 kHz OBS audio output; returns NULL otherwise (nothing runs then).

@@ -14,6 +14,7 @@
 // non-zero if any fails. CI runs it (scripts/ci/teamcity-macos.sh).
 //
 //   faders-mixtest <server> <key> [fold|wire]
+//   faders-mixtest enumeration
 //
 // "fold": only the plan-cap case; the hub must be sending {"type":"quality","maxStems":2}
 // (mock-hub --kbps 128 --max-stems 2). "wire": no checks; keeps the five sources playing for
@@ -349,21 +350,23 @@ static bool find_ptt_cb(void *data, obs_hotkey_id id, obs_hotkey_t *key)
 	return true;
 }
 
+int panel_enumeration(void);
 int test_panel_migration(const char *config_dir, const char *scenario);
 
 int main(int argc, char **argv)
 {
 	if (argc == 4 && strcmp(argv[1], "--panel-migration") == 0)
 		return test_panel_migration(argv[2], argv[3]);
-	if (argc < 3) {
-		fprintf(stderr, "usage: %s <server> <key> [fold]\n", argv[0]);
+	bool enumeration = argc == 2 && strcmp(argv[1], "enumeration") == 0;
+	if (argc < 3 && !enumeration) {
+		fprintf(stderr, "usage: %s <server> <key> [fold|wire] or %s enumeration\n", argv[0], argv[0]);
 		return 1;
 	}
 	bool fold = argc > 3 && strcmp(argv[3], "fold") == 0;
 	bool wire = argc > 3 && strcmp(argv[3], "wire") == 0;
 	char config_dir[512];
 	const char *tmp = getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp";
-	snprintf(config_dir, sizeof(config_dir), "%s/faders-mixtest-config", tmp);
+	snprintf(config_dir, sizeof(config_dir), "%s/%s", tmp, enumeration ? "faders-enumeration-config" : "faders-mixtest-config");
 	ui_thread = pthread_self();
 	if (!obs_startup("en-US", config_dir, NULL)) {
 		fprintf(stderr, "obs_startup failed\n");
@@ -406,6 +409,10 @@ int main(int argc, char **argv)
 	if (obs_open_module(&mod, FADERS_PLUGIN_BIN, FADERS_PLUGIN_DATA) != MODULE_SUCCESS || !obs_init_module(mod)) {
 		fprintf(stderr, "failed to load %s\n", FADERS_PLUGIN_BIN);
 		return 1;
+	}
+	if (enumeration) {
+		fails += panel_enumeration();
+		goto teardown;
 	}
 	// Four faders; the streamed track is track 1 (no streaming output here).
 	{
@@ -867,7 +874,7 @@ int main(int argc, char **argv)
 teardown:
 	for (int c = 0; c < 8; c++)
 		obs_set_output_source(c, NULL);
-	if (!fold && !wire) {
+	if (!fold && !wire && !enumeration) {
 		if (tr) {
 			obs_transition_clear(tr);
 			obs_source_release(tr);
