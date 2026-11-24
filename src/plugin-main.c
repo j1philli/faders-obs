@@ -984,6 +984,35 @@ static void duplicate_warning(const struct dialog_model *m, struct dstr *out)
 			      "those faders, or untick that track for it in Edit → Advanced Audio Properties.");
 }
 
+// A track dropdown edits the whole track. List the members that have no source
+// dropdown of their own on this fader, since removing one requires unticking it in OBS.
+static void add_track_members(obs_properties_t *group, const struct dialog_model *m, int fader)
+{
+	uint32_t tracks = 0;
+	for (int i = 0; i < m->n_items; i++) {
+		const struct dialog_item *it = &m->items[i];
+		if (it->track && it->fader == fader)
+			tracks |= 1u << (atoi(it->id + strlen(ITEM_TRACK)) - 1);
+	}
+	if (!tracks)
+		return;
+
+	struct dstr members = {0};
+	for (int i = 0; i < m->n_items; i++) {
+		const struct dialog_item *it = &m->items[i];
+		if (it->track || it->fader == fader || !(it->mixers & tracks))
+			continue;
+		dstr_cat(&members, members.len ? ", " : "From OBS tracks: ");
+		cat_escaped(&members, it->label);
+	}
+	if (members.len) {
+		char key[32];
+		snprintf(key, sizeof(key), "track_members:%d", fader);
+		add_hint(group, key, members.array);
+	}
+	dstr_free(&members);
+}
+
 static void add_assignment_rows(obs_properties_t *group, obs_data_t *settings)
 {
 	static struct dialog_model m; // large: off the stack (dialog code runs on the UI thread only)
@@ -1005,6 +1034,7 @@ static void add_assignment_rows(obs_properties_t *group, obs_data_t *settings)
 			add_dialog_row(group, &m, f, &m.items[i], first);
 			first = false;
 		}
+		add_track_members(group, &m, f);
 		add_dialog_row(group, &m, f, NULL, first);
 	}
 	// What's left over, by name, so nothing is a mystery (a source a track brings to a fader
