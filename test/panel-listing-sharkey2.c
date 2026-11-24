@@ -220,6 +220,16 @@ int main(void)
 	dialog();
 	result(audio_inputs() == 200 && listed(CABLE_C), "sharkey2: 6. C is input 200, in Everything else: listed", "%d inputs; found under: %s", audio_inputs(), where(CABLE_C));
 
+	// Past what the mixer takes (256 audio inputs), a source isn't mixed on its own and its audio
+	// stays in Everything else, so that's where it must be listed, wherever it was put.
+	c = newest_c_at(c, 257, "");
+	dialog();
+	result(audio_inputs() == 257 && listed(CABLE_C), "sharkey2: 6. C is input 257, in Everything else: listed", "%d inputs; found under: %s", audio_inputs(), where(CABLE_C));
+	c = newest_c_at(c, 257, "Music");
+	dialog();
+	result(audio_inputs() == 257 && !strcmp(where(CABLE_C), "Everything else"), "sharkey2: 6. C is input 257, on Music: on Everything else line", "%d inputs; found under: %s",
+	       audio_inputs(), where(CABLE_C));
+
 	// The same number of inputs with 6. C made early (before the newer sources): listed even on
 	// 0.4.0, so whether it shows depends on when it was made.
 	obs_source_remove(c);
