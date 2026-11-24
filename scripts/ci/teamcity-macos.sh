@@ -31,6 +31,10 @@ npm ci --no-audit --no-fund
 build/faders-mixcheck > mixcheck.log 2>&1 || { grep -E "^(PASS|FAIL|SKIP)" mixcheck.log; echo "##teamcity[buildProblem description='faders-mixcheck: a libobs mixer assumption failed']"; exit 1; }
 grep -E "^(PASS|FAIL|SKIP)" mixcheck.log
 
+# Source identity: kinds, renames, duplicate/unicode/long names list once, where the mixer plays them (test/identity.c).
+build/faders-identity > identity.log 2>&1 || { grep -E "^(PASS|FAIL)" identity.log; echo "##teamcity[buildProblem description='faders-identity: the dialog and the mixer disagree about a source']"; exit 1; }
+grep -E "^(PASS|FAIL)" identity.log
+
 # The hub's update notice is kept in the settings (test/update-notice.mjs runs its own mock hub).
 node test/update-notice.mjs
 node test/resume-backlog.mjs
