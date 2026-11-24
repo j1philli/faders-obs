@@ -32,6 +32,8 @@
 #include <math.h>
 #include <stdarg.h>
 
+bool test_panel_migration_rest(obs_source_t *source, const char *earlier_assignment);
+
 #define RATE 48000
 // A tone's stereo RMS for amplitude a: left = a·sin, right = a/2·sin → sqrt((1 + 1/4) / 2) / sqrt(2).
 #define TONE_RMS(a) ((a) * 0.5590170f)
@@ -563,6 +565,13 @@ int main(int argc, char **argv)
 	window(800, 600);
 	result(close_to(rest_via_track, R_EXTRA, 0.03) && close_to(rest_rms(), R_EXTRA, 0.03) && close_to(fader_rms("Voice"), R_VOICE, 0.03) && close_to(fader_rms("Music"), R_MUSIC, 0.03),
 	       "6e track → Everything else, and tracks unused again", "rest via track %.4f, after %.4f (want %.4f); Voice %.4f Music %.4f", rest_via_track, rest_rms(), R_EXTRA, fader_rms("Voice"), fader_rms("Music"));
+
+	bool after_rest = test_panel_migration_rest(extra, "");
+	result(after_rest, "panel-migration-track-after-rest", "%s",
+	       after_rest ? "Track 3 is on Voice and extra is absent from Everything else" : "expected Track 3 on Voice with extra absent from Everything else");
+	bool after_deleted = test_panel_migration_rest(extra, "Deleted fader");
+	result(after_deleted, "panel-migration-track-after-deleted", "%s",
+	       after_deleted ? "Track 3 is on Voice and extra is absent from Everything else" : "expected Track 3 on Voice with extra absent from Everything else");
 
 	// ── 6f-6h: the settings dialog, one block per fader ─────────────────────────────────
 	// Each fader's name is the label of its first row; its sources and tracks are dropdowns under
