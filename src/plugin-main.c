@@ -839,6 +839,7 @@ struct dialog_model {
 	int n;
 	struct dialog_item items[MAX_ITEMS];
 	int n_items;
+	struct dstr unmixed; // names of the audio inputs past what the mixer takes, ", "-joined (HTML)
 	obs_data_t *settings;
 };
 
@@ -863,8 +864,15 @@ static bool add_dialog_source(void *param, obs_source_t *s)
 {
 	struct dialog_model *m = param;
 	uint32_t flags = obs_source_get_output_flags(s);
-	if (!(flags & OBS_SOURCE_AUDIO) || (flags & OBS_SOURCE_COMPOSITE) || obs_source_get_type(s) != OBS_SOURCE_TYPE_INPUT || m->n_items >= FDR_MAX_AUDIO_SOURCES)
+	if (!(flags & OBS_SOURCE_AUDIO) || (flags & OBS_SOURCE_COMPOSITE) || obs_source_get_type(s) != OBS_SOURCE_TYPE_INPUT)
 		return true;
+	// Past what the mixer takes, a source isn't mixed on its own and its audio stays in Everything
+	// else, wherever it was put: it is named there, with no dropdown.
+	if (m->n_items >= FDR_MAX_AUDIO_SOURCES) {
+		dstr_cat(&m->unmixed, m->unmixed.len ? ", " : "");
+		cat_escaped(&m->unmixed, obs_source_get_name(s));
+		return true;
+	}
 	struct dialog_item *it = &m->items[m->n_items++];
 	memset(it, 0, sizeof(*it));
 	snprintf(it->id, sizeof(it->id), ITEM_SRC "%s", obs_source_get_uuid(s));
@@ -1017,6 +1025,11 @@ static void add_assignment_rows(obs_properties_t *group, obs_data_t *settings)
 		dstr_cat(&rest, rest.len ? ", " : "");
 		cat_escaped(&rest, m.items[i].label);
 	}
+	if (m.unmixed.len) {
+		dstr_cat(&rest, rest.len ? ", " : "");
+		dstr_cat_dstr(&rest, &m.unmixed);
+	}
+	dstr_free(&m.unmixed);
 	struct dstr text = {0};
 	dstr_printf(&text, "<b>Everything else:</b> %s. Any source not on a fader above goes here, along with alerts and transitions.", rest.len ? rest.array : "nothing right now");
 	add_hint(group, "rest_info", text.array);
