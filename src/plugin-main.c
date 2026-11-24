@@ -712,6 +712,14 @@ static bool refresh_queued;
 static volatile bool redraw_wanted;
 static long dialog_redraws; // test hook: update_properties signals seen
 
+static void audio_source_list_changed(void *unused, calldata_t *cd)
+{
+	UNUSED_PARAMETER(unused);
+	obs_source_t *source = calldata_ptr(cd, "source");
+	if ((obs_source_get_output_flags(source) & OBS_SOURCE_AUDIO) && obs_source_get_type(source) == OBS_SOURCE_TYPE_INPUT)
+		os_atomic_set_bool(&redraw_wanted, true);
+}
+
 static void redraw_window(void *unused)
 {
 	UNUSED_PARAMETER(unused);
@@ -1556,6 +1564,11 @@ bool obs_module_load(void)
 	// No-ops when there's no OBS frontend (e.g. the headless test host).
 	obs_frontend_add_tools_menu_item("Faders", open_settings, NULL);
 	obs_frontend_add_event_callback(on_frontend_event, NULL);
+	// OBS properties only reload when their own source requests it. Forward audio input
+	// creation and renames to the existing deferred redraw on the UI thread.
+	signal_handler_t *signals = obs_get_signal_handler();
+	signal_handler_connect(signals, "source_create", audio_source_list_changed, NULL);
+	signal_handler_connect(signals, "source_rename", audio_source_list_changed, NULL);
 	obs_add_tick_callback(watch_status, NULL);
 	blog(LOG_INFO, "[faders] loaded (version %s)", FDR_VERSION_STR);
 	return true;
@@ -1563,6 +1576,9 @@ bool obs_module_load(void)
 
 void obs_module_unload(void)
 {
+	signal_handler_t *signals = obs_get_signal_handler();
+	signal_handler_disconnect(signals, "source_create", audio_source_list_changed, NULL);
+	signal_handler_disconnect(signals, "source_rename", audio_source_list_changed, NULL);
 	obs_remove_tick_callback(watch_status, NULL);
 	if (settings_source)
 		signal_handler_disconnect(obs_source_get_signal_handler(settings_source), "update_properties", count_redraw, NULL);
