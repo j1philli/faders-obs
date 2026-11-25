@@ -322,11 +322,11 @@ int main(int argc, char **argv)
 		case_check("1 two virtual-cable inputs placed on Voice", s, want, 2);
 		remove_all(s, 2);
 	}
-	// ── 2: the same, never placed: the rule table puts Audio Input Captures on Voice ───────
+	// ── 2: the same, never placed: NEW, in Everything else (nothing is placed for you) ─────
 	{
 		obs_source_t *s[] = {capture("wasapi_input_capture", "Mic", "{mic}"), capture("wasapi_input_capture", "Music", "{vb-cable-output}")};
-		const char *want[] = {"Voice", "Voice"};
-		case_check("2 two virtual-cable inputs on Voice by default", s, want, 2);
+		const char *want[] = {"", ""};
+		case_check("2 two virtual-cable inputs never placed: NEW", s, want, 2);
 		remove_all(s, 2);
 	}
 	// ── 3: renamed after it was placed (assignments follow the source, not its name) ──────
@@ -363,7 +363,8 @@ int main(int argc, char **argv)
 	{
 		obs_source_t *s[] = {capture("wasapi_input_capture", "Mic", "{vb-cable-output}"), capture("wasapi_input_capture", "Music", "{vb-cable-output}")};
 		place(s[0], "Voice");
-		const char *want[] = {"Voice", "Voice"};
+		// Only the first is placed: the second is NEW, in Everything else (nothing guesses it).
+		const char *want[] = {"Voice", ""};
 		case_check("6 two inputs on the same virtual-cable device", s, want, 2);
 		remove_all(s, 2);
 	}

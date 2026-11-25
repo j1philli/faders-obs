@@ -148,7 +148,6 @@ else()
     target_compile_options(faders-mixtest PRIVATE ${MINGW_SHIM})
   endif()
 endif()
-target_sources(faders-mixtest PRIVATE test/panel-migration-rest.c)
 add_dependencies(faders-mixtest faders)
 
 # Panel listing tests: "What's on each fader" when a fader has 2+ sources, one executable per
@@ -194,3 +193,28 @@ else()
   endif()
 endif()
 add_dependencies(faders-identity faders)
+
+# Placement model on its own (src/placement.c, no OBS): value codec, saved vs effective, checks.
+add_executable(faders-placement-unit test/placement-unit.c)
+add_test(NAME placement-unit COMMAND faders-placement-unit)
+add_test(NAME identity COMMAND faders-identity)
+
+# Placement through the real plugin: nothing is placed for you, moves are checked, the window
+# follows the sources (test/placement.c). One process per scenario.
+add_executable(faders-placement test/placement.c)
+target_include_directories(faders-placement PRIVATE ${OBS_INCLUDES})
+target_compile_definitions(faders-placement PRIVATE FADERS_PLUGIN_BIN="${PLUGIN_BIN}" FADERS_PLUGIN_DATA="${PLUGIN_DATA}" FADERS_GRAPHICS_MODULE="${GRAPHICS_MODULE}")
+if(APPLE)
+  target_link_options(faders-placement PRIVATE "-F${FRAMEWORKS}" "-Wl,-rpath,${FRAMEWORKS}")
+  target_link_libraries(faders-placement PRIVATE "-framework libobs")
+else()
+  target_link_libraries(faders-placement PRIVATE ${OBS_IMPORT_LIBS})
+  if(NOT MSVC)
+    target_link_options(faders-placement PRIVATE -static-libgcc -static)
+    target_compile_options(faders-placement PRIVATE ${MINGW_SHIM})
+  endif()
+endif()
+add_dependencies(faders-placement faders)
+foreach(scenario model legacy duplicate validate capacity sharkey2 refresh cancel firstrun firstrun-placed)
+  add_test(NAME placement-${scenario} COMMAND faders-placement ${scenario})
+endforeach()
