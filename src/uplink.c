@@ -214,17 +214,41 @@ static void send_status(struct fdr_uplink *u, uint64_t now)
 	bool send = u->stream_status_dirty && u->ws && u->connected && u->watching_stream;
 	if (send)
 		u->stream_status_dirty = false;
-	char msg[160];
-	if (u->status.mix_mismatch[0])
-		snprintf(msg, sizeof(msg), "{\"type\":\"status\",\"streamAudio\":\"%s\",\"track\":%d,\"mixMismatch\":\"%s\"}", silent ? "silent" : "ok", u->status.stream_track, u->status.mix_mismatch);
-	else
-		snprintf(msg, sizeof(msg), "{\"type\":\"status\",\"streamAudio\":\"%s\",\"track\":%d}", silent ? "silent" : "ok", u->status.stream_track);
+	struct dstr msg = {0};
+	if (send)
+		dstr_printf(&msg, "{\"type\":\"status\",\"streamAudio\":\"%s\",\"track\":%d", silent ? "silent" : "ok", u->status.stream_track);
+	if (send && u->status.mix_mismatch[0]) {
+		// The source's name, as the streamer typed it: a JSON string in valid UTF-8 (quotes and
+		// backslashes escaped, controls dropped, and a character the copy cut short left out),
+		// or the hub can't read the message at all.
+		dstr_cat(&msg, ",\"mixMismatch\":\"");
+		for (const char *c = u->status.mix_mismatch; *c;) {
+			unsigned char b = (unsigned char)*c;
+			size_t n = b < 0x80 ? 1 : (b & 0xe0) == 0xc0 ? 2 : (b & 0xf0) == 0xe0 ? 3 : (b & 0xf8) == 0xf0 ? 4 : 0;
+			bool whole = n > 0;
+			for (size_t i = 1; i < n && whole; i++)
+				whole = ((unsigned char)c[i] & 0xc0) == 0x80;
+			if (!whole) {
+				c++;
+				continue;
+			}
+			if (b == '"' || b == '\\')
+				dstr_catf(&msg, "\\%c", b);
+			else if (b >= 0x20)
+				dstr_ncat(&msg, c, n);
+			c += n;
+		}
+		dstr_cat(&msg, "\"");
+	}
+	if (send)
+		dstr_cat(&msg, "}");
 	pthread_mutex_unlock(&u->mu);
-	if (send && !fdr_ws_send_text(u->ws, msg)) {
+	if (send && !fdr_ws_send_text(u->ws, msg.array)) {
 		pthread_mutex_lock(&u->mu);
 		u->stream_status_dirty = true;
 		pthread_mutex_unlock(&u->mu);
 	}
+	dstr_free(&msg);
 }
 
 // Worker thread. The stem list goes out on every (re)connect and whenever it changes, before

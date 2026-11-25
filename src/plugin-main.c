@@ -198,24 +198,6 @@ static void apply_faders(obs_data_t *s)
 	fdr_mixer_set_track_faders(mixer, tracks);
 }
 
-// The assigned track (1-6) that decides `s`'s fader from the settings alone (the dialog shows
-// this whether or not the mixer is running), or 0; *fader is its choice.
-static int settings_track_for(obs_data_t *settings, obs_source_t *s, const char **fader)
-{
-	uint32_t mixers = obs_source_get_audio_mixers(s);
-	int stream = stream_audio_track();
-	for (int t = 1; t <= 6; t++) {
-		char key[16];
-		snprintf(key, sizeof(key), TRACK_PREFIX "%d", t);
-		const char *v = obs_data_get_string(settings, key);
-		if (!*v || strcmp(v, CHOICE_NONE) == 0 || t == (stream ? stream : 1) || !(mixers & (1u << (t - 1))))
-			continue;
-		*fader = v;
-		return t;
-	}
-	return 0;
-}
-
 // What the running uplink was started with (locked by uplink_mu).
 static struct dstr run_server, run_key;
 
@@ -859,6 +841,23 @@ static int name_index(const struct dialog_model *m, const char *name)
 	return -1;
 }
 
+// Find a track that carries this source to a named fader. Earlier tracks that
+// resolve to Everything else don't prevent a later track from carrying it.
+static int settings_named_track_for(const struct dialog_model *m, uint32_t mixers)
+{
+	int stream = stream_audio_track();
+	for (int t = 1; t <= 6; t++) {
+		if (t == (stream ? stream : 1) || !(mixers & (1u << (t - 1))))
+			continue;
+		char key[16];
+		snprintf(key, sizeof(key), TRACK_PREFIX "%d", t);
+		const char *v = obs_data_get_string(m->settings, key);
+		if (strcmp(v, CHOICE_NONE) != 0 && strcmp(v, CHOICE_REST) != 0 && name_index(m, v) >= 0)
+			return t;
+	}
+	return 0;
+}
+
 static bool add_dialog_source(void *param, obs_source_t *s)
 {
 	struct dialog_model *m = param;
@@ -869,6 +868,17 @@ static bool add_dialog_source(void *param, obs_source_t *s)
 	memset(it, 0, sizeof(*it));
 	snprintf(it->id, sizeof(it->id), ITEM_SRC "%s", obs_source_get_uuid(s));
 	snprintf(it->label, sizeof(it->label), "%s", obs_source_get_name(s));
+	// A name too long for the label is cut between characters, never inside one (OBS would show
+	// a broken character at the end of the row).
+	size_t len = strlen(it->label), start = len;
+	while (start > 0 && ((unsigned char)it->label[start - 1] & 0xc0) == 0x80)
+		start--;
+	if (start > 0) {
+		unsigned char lead = (unsigned char)it->label[start - 1];
+		size_t need = lead < 0x80 ? 1 : (lead & 0xe0) == 0xc0 ? 2 : (lead & 0xf0) == 0xe0 ? 3 : 4;
+		if (len - (start - 1) < need)
+			it->label[start - 1] = 0;
+	}
 	it->mixers = obs_source_get_audio_mixers(s);
 	// Its own row: the fader the streamer put it on, or the plugin's starting guess from the kind
 	// of source. Tracks don't change that; they add to it.
@@ -881,11 +891,8 @@ static bool add_dialog_source(void *param, obs_source_t *s)
 		if (it->fader < 0 && pick && strcmp(pick, "Discord") == 0)
 			it->fader = name_index(m, "Voice");
 	}
-	if (it->fader < 0) {
-		const char *choice = NULL;
-		int t = settings_track_for(m->settings, s, &choice);
-		it->via = t && name_index(m, choice) >= 0 ? t : 0;
-	}
+	if (it->fader < 0)
+		it->via = settings_named_track_for(m, it->mixers);
 	obs_data_release(priv);
 	return true;
 }
