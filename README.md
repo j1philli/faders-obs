@@ -18,18 +18,19 @@ transitions). Your Twitch stream is not touched.
   Faders** (a tickable group that turns the plugin on and off: **Plugin key** with a link to
   the portal, and **Only connect while I'm live**), **Your faders** (names, in order, and how
   many the plan includes), **What's on each fader** (a block per fader, its name on the left: one dropdown per
-  source or OBS track on it, then "Add a source or track…", which offers only what isn't on a
-  fader yet; a row's "Remove from …" sends a source to Everything else, which is listed by name
+  source on it, then "Add a source…", which offers only what isn't on a fader yet, NEW sources
+  marked; a row's "Remove from …" sends a source to Everything else, which is listed by name
   underneath), then the version and links. The info rows are Qt rich text (`<table>` cards,
   colours from `obs_frontend_is_theme_dark`); lines are broken in the plugin rather than
   word-wrapped by Qt, which would leave tall gaps in OBS's form layout.
-  There is no "Auto": sources the rule table in `PROTOCOL.md` recognises start on
-  their fader and show as ordinary rows. A track on a fader is an assignment rule, not a second
-  audio path: every source ticked for it plays on that fader. Nothing is de-duplicated: a source
-  that also has a fader of its own, or is ticked for another assigned track, plays on each, and
-  then the layers add up to more than the stream for that source (Everything else is still
-  measured with every source counted once). The dialog asks OBS to redraw after each change (`obs_source_update_properties`).
-  Scripting: `faders_assign`, `faders_assign_track`; tests drive the real properties with
+  Sources start in Everything else, marked NEW, until placed. There are no rules and no track
+  mapping (`src/placement.h`). A move is checked against the faders as they are now: one to a
+  fader that is gone or past the plan is refused, and the window says why. A duplicated source
+  keeps the original's fader (OBS copies its private settings). The window redraws after each
+  change and when audio inputs are created, renamed or removed (`obs_source_update_properties`,
+  at most every 250 ms). On the first start after installing, with nothing placed, Tools →
+  Faders opens once.
+  Scripting: `faders_assign`, `faders_place`, `faders_placement`; tests drive the real properties with
   `faders_dialog` / `faders_dialog_set`. The
   server is `wss://hub.faders.tv/ingest` (the key identifies the channel); tests point it
   elsewhere with the `faders_configure` procedure.
@@ -58,8 +59,10 @@ transitions). Your Twitch stream is not touched.
 - When the hub reports a newer release, **Tools → Faders** shows "Faders X.Y.Z is available" with a link
   to the download page. The plugin never updates itself.
 - Scriptable, on the global proc handler: `faders_configure(server, key, faders, only_live)`
-  (`faders` = "Voice,Game,Music,Discord"), `faders_assign(source, fader)` (a fader name,
-  "" for Everything else, "auto"), `faders_watch_stream_track(track)`,
+  (`faders` = "Voice,Game,Music,Discord"), `faders_assign(source, fader, out ok, out error)`
+  (a fader name or "" for Everything else; checked like a pick in the window),
+  `faders_place(source, value, out ok, out error)` (`f:<fader>`, `x:rest`, `x:new`, `x:keep`),
+  `faders_placement(source, out saved, out effective, out state)`, `faders_watch_stream_track(track)`,
   `faders_transition_duration(ms)`, `faders_rebuild()`, `faders_status(out status)` and
   `faders_mixer_stats(out json)` (levels per fader and residual, gate decisions, timing).
 
