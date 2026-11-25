@@ -33,6 +33,9 @@ ctest --test-dir build -R panel-enumeration --output-on-failure
 build/faders-mixcheck > mixcheck.log 2>&1 || { grep -E "^(PASS|FAIL|SKIP)" mixcheck.log; echo "##teamcity[buildProblem description='faders-mixcheck: a libobs mixer assumption failed']"; exit 1; }
 grep -E "^(PASS|FAIL|SKIP)" mixcheck.log
 
+# Tools → Faders lists every source on each fader (test/panel-listing-*.c: no hub, no audio).
+for t in build/faders-panel-listing-*; do "$t" 2>/dev/null | grep -E "^(PASS|FAIL)" || { echo "##teamcity[buildProblem description='$(basename "$t"): a fader's sources are listed wrongly']"; exit 1; }; done
+
 # Source identity: kinds, renames, duplicate/unicode/long names list once, where the mixer plays them (test/identity.c).
 build/faders-identity > identity.log 2>&1 || { grep -E "^(PASS|FAIL)" identity.log; echo "##teamcity[buildProblem description='faders-identity: the dialog and the mixer disagree about a source']"; exit 1; }
 grep -E "^(PASS|FAIL)" identity.log

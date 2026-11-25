@@ -1211,6 +1211,10 @@ static bool apply_dialog_changes(obs_data_t *settings)
 		const char *now = obs_data_get_string(settings, row->key);
 		if (strcmp(now, row->item) == 0)
 			continue;
+		// An existing row offers only "Remove". Any other value is an old copy of the dropdowns
+		// (OBS's Cancel, Discard and Undo put back the settings as the window opened), not a pick.
+		if (*row->item && strcmp(now, CHOICE_REMOVE) != 0)
+			continue;
 		changed = true;
 		if (*row->item) // an existing row: what it held leaves this fader
 			assign_item(settings, row->item, NULL);
