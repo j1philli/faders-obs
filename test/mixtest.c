@@ -353,9 +353,12 @@ static bool find_ptt_cb(void *data, obs_hotkey_id id, obs_hotkey_t *key)
 }
 
 int panel_enumeration(void);
+int test_panel_migration(const char *config_dir, const char *scenario);
 
 int main(int argc, char **argv)
 {
+	if (argc == 4 && strcmp(argv[1], "--panel-migration") == 0)
+		return test_panel_migration(argv[2], argv[3]);
 	bool enumeration = argc == 2 && strcmp(argv[1], "enumeration") == 0;
 	if (argc < 3 && !enumeration) {
 		fprintf(stderr, "usage: %s <server> <key> [fold|wire] or %s enumeration\n", argv[0], argv[0]);
