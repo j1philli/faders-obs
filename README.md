@@ -119,7 +119,7 @@ cmake -S . -B build -A x64; cmake --build build --config Release
 Cross-compiling from macOS or Linux (how releases are built): `./scripts/cross-windows.sh` (MinGW-w64)
 → `build-win/faders.dll`; `scripts/ci/check-windows-dll.py` verifies its exports and imports.
 
-Installer: `makensis -DVERSION=0.4.0 -DDLL=<path>/faders.dll -DOUTFILE=<path>/faders-obs-0.4.0-windows.exe installer/windows/faders.nsi`
+Installer: `makensis -DVERSION=0.4.1 -DDLL=<path>/faders.dll -DOUTFILE=<path>/faders-obs-0.4.1-windows.exe installer/windows/faders.nsi`
 (NSIS 3, on Windows or Linux). The installer art in `installer/` is generated from the Faders
 brand kit.
 
