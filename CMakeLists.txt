@@ -135,7 +135,7 @@ else()
 endif()
 
 # Mixer test: the virtual mixer through the real plugin (test/mixtest.c).
-add_executable(faders-mixtest test/mixtest.c)
+add_executable(faders-mixtest test/mixtest.c test/panel-enumeration.c test/panel-migration.c)
 target_include_directories(faders-mixtest PRIVATE ${OBS_INCLUDES})
 target_compile_definitions(faders-mixtest PRIVATE FADERS_PLUGIN_BIN="${PLUGIN_BIN}" FADERS_PLUGIN_DATA="${PLUGIN_DATA}" FADERS_GRAPHICS_MODULE="${GRAPHICS_MODULE}" FADERS_OBS_TRANSITIONS_BIN="${OBS_TRANSITIONS_BIN}" FADERS_OBS_TRANSITIONS_DATA="${OBS_TRANSITIONS_DATA}")
 if(APPLE)
@@ -148,6 +148,7 @@ else()
     target_compile_options(faders-mixtest PRIVATE ${MINGW_SHIM})
   endif()
 endif()
+target_sources(faders-mixtest PRIVATE test/panel-migration-rest.c)
 add_dependencies(faders-mixtest faders)
 
 # Panel listing tests: "What's on each fader" when a fader has 2+ sources, one executable per
@@ -170,3 +171,26 @@ foreach(test_src ${PANEL_LISTING_TESTS})
   endif()
   add_dependencies(faders-${test_name} faders)
 endforeach()
+
+enable_testing()
+add_test(NAME panel-enumeration COMMAND faders-mixtest enumeration)
+foreach(scenario IN ITEMS legacy track-only map-and-track)
+  add_test(NAME panel-migration-${scenario}
+    COMMAND faders-mixtest --panel-migration "${CMAKE_CURRENT_BINARY_DIR}/panel-migration-${scenario}" "${scenario}")
+endforeach()
+
+# Source identity: kinds, renames, duplicate/unicode/long names; dialog and mixer agree (test/identity.c).
+add_executable(faders-identity test/identity.c)
+target_include_directories(faders-identity PRIVATE ${OBS_INCLUDES})
+target_compile_definitions(faders-identity PRIVATE FADERS_PLUGIN_BIN="${PLUGIN_BIN}" FADERS_PLUGIN_DATA="${PLUGIN_DATA}" FADERS_GRAPHICS_MODULE="${GRAPHICS_MODULE}")
+if(APPLE)
+  target_link_options(faders-identity PRIVATE "-F${FRAMEWORKS}" "-Wl,-rpath,${FRAMEWORKS}")
+  target_link_libraries(faders-identity PRIVATE "-framework libobs")
+else()
+  target_link_libraries(faders-identity PRIVATE ${OBS_IMPORT_LIBS})
+  if(NOT MSVC)
+    target_link_options(faders-identity PRIVATE -static-libgcc -static)
+    target_compile_options(faders-identity PRIVATE ${MINGW_SHIM})
+  endif()
+endif()
+add_dependencies(faders-identity faders)

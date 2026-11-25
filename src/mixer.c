@@ -24,7 +24,7 @@
 #define RATE 48000
 #define FRAMES AUDIO_OUTPUT_FRAMES // 1024 per tick
 #define CH 2
-#define MAX_ENTRIES 256
+#define MAX_ENTRIES FDR_MAX_AUDIO_SOURCES
 #define REST FDR_MAX_FADERS // fader index meaning "Everything else"
 // Oracle: per ~0.5 s window (24 ticks), the residual correlated with a source's contribution.
 // |r| > 0.5 for 3 windows in a row means the source isn't in the stream the way we include it:

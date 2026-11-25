@@ -14,6 +14,7 @@
 // non-zero if any fails. CI runs it (scripts/ci/teamcity-macos.sh).
 //
 //   faders-mixtest <server> <key> [fold|wire]
+//   faders-mixtest enumeration
 //
 // "fold": only the plan-cap case; the hub must be sending {"type":"quality","maxStems":2}
 // (mock-hub --kbps 128 --max-stems 2). "wire": no checks; keeps the five sources playing for
@@ -31,6 +32,8 @@
 #include <string.h>
 #include <math.h>
 #include <stdarg.h>
+
+bool test_panel_migration_rest(obs_source_t *source, const char *earlier_assignment);
 
 #define RATE 48000
 // A tone's stereo RMS for amplitude a: left = a·sin, right = a/2·sin → sqrt((1 + 1/4) / 2) / sqrt(2).
@@ -349,17 +352,23 @@ static bool find_ptt_cb(void *data, obs_hotkey_id id, obs_hotkey_t *key)
 	return true;
 }
 
+int panel_enumeration(void);
+int test_panel_migration(const char *config_dir, const char *scenario);
+
 int main(int argc, char **argv)
 {
-	if (argc < 3) {
-		fprintf(stderr, "usage: %s <server> <key> [fold]\n", argv[0]);
+	if (argc == 4 && strcmp(argv[1], "--panel-migration") == 0)
+		return test_panel_migration(argv[2], argv[3]);
+	bool enumeration = argc == 2 && strcmp(argv[1], "enumeration") == 0;
+	if (argc < 3 && !enumeration) {
+		fprintf(stderr, "usage: %s <server> <key> [fold|wire] or %s enumeration\n", argv[0], argv[0]);
 		return 1;
 	}
 	bool fold = argc > 3 && strcmp(argv[3], "fold") == 0;
 	bool wire = argc > 3 && strcmp(argv[3], "wire") == 0;
 	char config_dir[512];
 	const char *tmp = getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp";
-	snprintf(config_dir, sizeof(config_dir), "%s/faders-mixtest-config", tmp);
+	snprintf(config_dir, sizeof(config_dir), "%s/%s", tmp, enumeration ? "faders-enumeration-config" : "faders-mixtest-config");
 	ui_thread = pthread_self();
 	if (!obs_startup("en-US", config_dir, NULL)) {
 		fprintf(stderr, "obs_startup failed\n");
@@ -402,6 +411,10 @@ int main(int argc, char **argv)
 	if (obs_open_module(&mod, FADERS_PLUGIN_BIN, FADERS_PLUGIN_DATA) != MODULE_SUCCESS || !obs_init_module(mod)) {
 		fprintf(stderr, "failed to load %s\n", FADERS_PLUGIN_BIN);
 		return 1;
+	}
+	if (enumeration) {
+		fails += panel_enumeration();
+		goto teardown;
 	}
 	// Four faders; the streamed track is track 1 (no streaming output here).
 	{
@@ -563,6 +576,13 @@ int main(int argc, char **argv)
 	window(800, 600);
 	result(close_to(rest_via_track, R_EXTRA, 0.03) && close_to(rest_rms(), R_EXTRA, 0.03) && close_to(fader_rms("Voice"), R_VOICE, 0.03) && close_to(fader_rms("Music"), R_MUSIC, 0.03),
 	       "6e track → Everything else, and tracks unused again", "rest via track %.4f, after %.4f (want %.4f); Voice %.4f Music %.4f", rest_via_track, rest_rms(), R_EXTRA, fader_rms("Voice"), fader_rms("Music"));
+
+	bool after_rest = test_panel_migration_rest(extra, "");
+	result(after_rest, "panel-migration-track-after-rest", "%s",
+	       after_rest ? "Track 3 is on Voice and extra is absent from Everything else" : "expected Track 3 on Voice with extra absent from Everything else");
+	bool after_deleted = test_panel_migration_rest(extra, "Deleted fader");
+	result(after_deleted, "panel-migration-track-after-deleted", "%s",
+	       after_deleted ? "Track 3 is on Voice and extra is absent from Everything else" : "expected Track 3 on Voice with extra absent from Everything else");
 
 	// ── 6f-6h: the settings dialog, one block per fader ─────────────────────────────────
 	// Each fader's name is the label of its first row; its sources and tracks are dropdowns under
@@ -863,7 +883,7 @@ int main(int argc, char **argv)
 teardown:
 	for (int c = 0; c < 8; c++)
 		obs_set_output_source(c, NULL);
-	if (!fold && !wire) {
+	if (!fold && !wire && !enumeration) {
 		if (tr) {
 			obs_transition_clear(tr);
 			obs_source_release(tr);

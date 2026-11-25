@@ -27,6 +27,8 @@ npm ci --no-audit --no-fund
 ./scripts/fetch-deps.sh
 ./scripts/build-macos.sh # universal plugin (arm64 + x86_64) and the arm64 headless host
 
+ctest --test-dir build -R panel-enumeration --output-on-failure
+
 # libobs behaviour the virtual mixer relies on (PROTOCOL.md "Virtual mixer"): every check must pass.
 build/faders-mixcheck > mixcheck.log 2>&1 || { grep -E "^(PASS|FAIL|SKIP)" mixcheck.log; echo "##teamcity[buildProblem description='faders-mixcheck: a libobs mixer assumption failed']"; exit 1; }
 grep -E "^(PASS|FAIL|SKIP)" mixcheck.log
@@ -34,9 +36,14 @@ grep -E "^(PASS|FAIL|SKIP)" mixcheck.log
 # Tools → Faders lists every source on each fader (test/panel-listing-*.c: no hub, no audio).
 for t in build/faders-panel-listing-*; do "$t" 2>/dev/null | grep -E "^(PASS|FAIL)" || { echo "##teamcity[buildProblem description='$(basename "$t"): a fader's sources are listed wrongly']"; exit 1; }; done
 
+# Source identity: kinds, renames, duplicate/unicode/long names list once, where the mixer plays them (test/identity.c).
+build/faders-identity > identity.log 2>&1 || { grep -E "^(PASS|FAIL)" identity.log; echo "##teamcity[buildProblem description='faders-identity: the dialog and the mixer disagree about a source']"; exit 1; }
+grep -E "^(PASS|FAIL)" identity.log
+
 # The hub's update notice is kept in the settings (test/update-notice.mjs runs its own mock hub).
 node test/update-notice.mjs
 node test/resume-backlog.mjs
+node test/status-name.mjs # a mismatched source's name reaches the hub as valid JSON and UTF-8
 
 # Transport shutdown: once fdr_ws_destroy() returns, no callback is running (test/wstest.c).
 node test/ws-flood.mjs --port "$((PORT + 4))" > ws-flood.log 2>&1 &
