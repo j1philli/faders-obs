@@ -10,6 +10,7 @@
  */
 #include "mixer.h"
 #include "placement.h"
+#include "logring.h"
 
 #include <obs-module.h>
 #include <util/platform.h>
@@ -546,15 +547,15 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 		yy = 0;
 		if (drop) {
 			snprintf(m->mismatch, sizeof(m->mismatch), "%s", drop);
-			blog(LOG_WARNING, "[faders] \"%s\" is sent to Faders but is not in your stream (Track %d) the same way: moved to Everything else for this session. Check the source's track and that it isn't monitor-only.", drop, m->stream_track);
+			fdr_log(LOG_WARNING, "\"%s\" is sent to Faders but is not in your stream (Track %d) the same way: moved to Everything else for this session. Check the source's track and that it isn't monitor-only.", drop, m->stream_track);
 			fdr_uplink_set_mismatch(m->uplink, drop);
 		}
 		if (dup) {
 			snprintf(m->duplicate, sizeof(m->duplicate), "%s", dup);
-			blog(LOG_WARNING, "[faders] \"%s\" is in your stream (Track %d) more than once: it is captured twice, or another source plays the same audio. Its fader only controls one copy; the other is in Everything else.", dup, m->stream_track);
+			fdr_log(LOG_WARNING, "\"%s\" is in your stream (Track %d) more than once: it is captured twice, or another source plays the same audio. Its fader only controls one copy; the other is in Everything else.", dup, m->stream_track);
 			fdr_uplink_set_duplicate(m->uplink, dup);
 		} else if (dup_gone) {
-			blog(LOG_INFO, "[faders] \"%s\" is no longer in your stream more than once", m->duplicate);
+			fdr_log(LOG_INFO, "\"%s\" is no longer in your stream more than once", m->duplicate);
 			m->duplicate[0] = 0;
 			fdr_uplink_set_duplicate(m->uplink, NULL);
 		}
@@ -708,7 +709,7 @@ void fdr_mixer_rebuild(fdr_mixer_t *m)
 	m->overflow_warned = m->overflow_warned || snap->overflow;
 	pthread_mutex_unlock(&m->mu);
 	if (warn)
-		blog(LOG_WARNING, "[faders] more than %d audio sources: the ones past that are left in Everything else", MAX_ENTRIES);
+		fdr_log(LOG_WARNING, "more than %d audio sources: the ones past that are left in Everything else", MAX_ENTRIES);
 	track_transition(m);
 	free_snapshot(old);
 }
@@ -760,7 +761,7 @@ static void on_transition_start(void *data, calldata_t *cd)
 		m->dbg_until = f.start_ns + 1000000000ULL;
 	pthread_mutex_unlock(&m->mu);
 	if (getenv("FADERS_DEBUG"))
-		blog(LOG_INFO, "[faders] transition start: %s → %s, %llu ms, A tree %d, B tree %d, modelled=%d", name_a, name_b, (unsigned long long)(dur / 1000000ULL), f.na, f.nb, f.active);
+		fdr_log(LOG_INFO, "transition start: %s → %s, %llu ms, A tree %d, B tree %d, modelled=%d", name_a, name_b, (unsigned long long)(dur / 1000000ULL), f.na, f.nb, f.active);
 	obs_source_release(a);
 	obs_source_release(b);
 }
@@ -810,7 +811,7 @@ static void *rebuild_thread(void *param)
 			m->max_stems = allowed;
 			int wire = m->n_faders < allowed ? m->n_faders : allowed;
 			if (m->n_faders > allowed)
-				blog(LOG_INFO, "[faders] your plan includes %d faders: \"%s\" and later are folded into Everything else", allowed, m->names[allowed]);
+				fdr_log(LOG_INFO, "your plan includes %d faders: \"%s\" and later are folded into Everything else", allowed, m->names[allowed]);
 			m->n_wire = wire;
 			announce(m);
 			pthread_mutex_unlock(&m->mu);
@@ -857,11 +858,11 @@ fdr_mixer_t *fdr_mixer_start(fdr_uplink_t *uplink, int stream_track)
 {
 	struct obs_audio_info ai;
 	if (!obs_get_audio_info(&ai) || ai.speakers != SPEAKERS_STEREO) {
-		blog(LOG_WARNING, "[faders] Faders needs stereo OBS audio (Settings → Audio → Channels): not running");
+		fdr_log(LOG_WARNING, "Faders needs stereo OBS audio (Settings → Audio → Channels): not running");
 		return NULL;
 	}
 	if (ai.samples_per_sec != RATE) {
-		blog(LOG_WARNING, "[faders] Faders needs 48 kHz OBS audio (Settings → Audio → Sample Rate): not running");
+		fdr_log(LOG_WARNING, "Faders needs 48 kHz OBS audio (Settings → Audio → Sample Rate): not running");
 		return NULL;
 	}
 	struct fdr_mixer *m = bzalloc(sizeof(*m));
@@ -877,7 +878,7 @@ fdr_mixer_t *fdr_mixer_start(fdr_uplink_t *uplink, int stream_track)
 	os_event_init(&m->stop_ev, OS_EVENT_TYPE_MANUAL);
 	pthread_create(&m->thread, NULL, rebuild_thread, m);
 	tap(m, true);
-	blog(LOG_INFO, "[faders] virtual mixer started on Track %d", m->stream_track);
+	fdr_log(LOG_INFO, "virtual mixer started on Track %d", m->stream_track);
 	return m;
 }
 
@@ -910,7 +911,7 @@ void fdr_mixer_stop(fdr_mixer_t *m)
 	pthread_mutex_destroy(&m->mu);
 	pthread_mutex_destroy(&m->tr_mu);
 	bfree(m);
-	blog(LOG_INFO, "[faders] virtual mixer stopped");
+	fdr_log(LOG_INFO, "virtual mixer stopped");
 }
 
 void fdr_mixer_set_stream_track(fdr_mixer_t *m, int stream_track)
@@ -958,7 +959,7 @@ void fdr_mixer_set_faders(fdr_mixer_t *m, const char *const *names, int n, int m
 	m->max_stems = max_stems;
 	int wire = m->n_faders < max_stems ? m->n_faders : max_stems;
 	if (wire != m->n_wire && m->n_faders > max_stems)
-		blog(LOG_INFO, "[faders] your plan includes %d faders: \"%s\" and later are folded into Everything else", max_stems, m->names[max_stems]);
+		fdr_log(LOG_INFO, "your plan includes %d faders: \"%s\" and later are folded into Everything else", max_stems, m->names[max_stems]);
 	m->n_wire = wire;
 	announce(m);
 	pthread_mutex_unlock(&m->mu);

@@ -22,9 +22,14 @@
 #include <util/dstr.h>
 #include <callback/calldata.h>
 #include <callback/proc.h>
+#include <stdlib.h>
+#include <time.h>
 #include "uplink.h"
 #include "mixer.h"
 #include "placement.h"
+#include "logring.h"
+#include "report.h"
+#include "sysinfo.h"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("faders", "en-US")
@@ -57,6 +62,7 @@ static fdr_mixer_t *mixer;
 static pthread_mutex_t uplink_mu = PTHREAD_MUTEX_INITIALIZER;
 static bool streaming;
 static bool frontend_loaded;
+static uint64_t loaded_ns, stream_started_ns; // for the debug report's uptimes
 static int forced_stream_track; // headless tests: faders_watch_stream_track
 static int forced_transition_ms; // headless tests: faders_transition_duration
 static int max_stems_seen = FDR_MAX_FADERS; // the mixer's cap: none until the hub says
@@ -205,7 +211,7 @@ static bool erase_legacy_tracks(obs_data_t *s)
 		}
 	}
 	if (any)
-		blog(LOG_INFO, "[faders] removed the old OBS track settings: tracks don't decide faders any more");
+		fdr_log(LOG_INFO, "removed the old OBS track settings: tracks don't decide faders any more");
 	return any;
 }
 
@@ -1247,7 +1253,7 @@ static bool place_source(obs_data_t *settings, obs_source_t *s, const char *valu
 			else
 				dstr_cat(error, "that isn't a place a source can go.");
 		}
-		blog(LOG_INFO, "[faders] move of \"%s\" to %s refused: %s", s ? obs_source_get_name(s) : "?", value ? value : "(null)", fdr_reject_name(r));
+		fdr_log(LOG_INFO, "move of \"%s\" to %s refused: %s", s ? obs_source_get_name(s) : "?", value ? value : "(null)", fdr_reject_name(r));
 		return false;
 	}
 	if (!s) {
@@ -1270,7 +1276,7 @@ static bool place_source(obs_data_t *settings, obs_source_t *s, const char *valu
 		obs_data_release(priv);
 	}
 	pthread_mutex_unlock(&uplink_mu);
-	blog(LOG_INFO, "[faders] \"%s\" → %s", obs_source_get_name(s), !to ? "not placed (new)" : *to ? to : "Everything else");
+	fdr_log(LOG_INFO, "\"%s\" → %s", obs_source_get_name(s), !to ? "not placed (new)" : *to ? to : "Everything else");
 	return true;
 }
 
@@ -1352,7 +1358,7 @@ static void follow_renames(const char names[][FDR_STEM_NAME_MAX], int n)
 				continue; // a swap or a reorder, not a rename
 			struct rename r = {last_names[i], names[i]};
 			obs_enum_sources(rename_source, &r);
-			blog(LOG_INFO, "[faders] fader \"%s\" renamed to \"%s\": its sources follow", r.from, r.to);
+			fdr_log(LOG_INFO, "fader \"%s\" renamed to \"%s\": its sources follow", r.from, r.to);
 		}
 	}
 	memcpy(last_names, names, sizeof(last_names));
@@ -1496,6 +1502,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *unused)
 		break;
 	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
 		streaming = true;
+		stream_started_ns = os_gettime_ns();
 		apply_current();
 		break;
 	case OBS_FRONTEND_EVENT_STREAMING_STOPPED:
@@ -1718,8 +1725,223 @@ static void proc_rebuild(void *unused, calldata_t *cd)
 	pthread_mutex_unlock(&uplink_mu);
 }
 
+// ── Debug report ────────────────────────────────────────────────────────────────────────
+// A snapshot of what the plugin knows, built into the report by report.c (redacted, names on or
+// off, fail closed). Nothing here sends it anywhere: the streamer copies or saves it.
+
+#define REPORT_MAX_SOURCES 1000 // read at most this many audio inputs (the report lists 200)
+
+struct report_sources {
+	struct fdr_report_source list[REPORT_MAX_SOURCES];
+	char *strings[REPORT_MAX_SOURCES * 4];
+	int n, n_strings, total;
+	struct fader_set faders;
+	uint32_t stream_bit;
+};
+
+static const char *keep(struct report_sources *r, const char *s)
+{
+	char *d = bstrdup(s ? s : "");
+	r->strings[r->n_strings++] = d;
+	return d;
+}
+
+static const char *monitoring_name(enum obs_monitoring_type t)
+{
+	return t == OBS_MONITORING_TYPE_MONITOR_ONLY ? "monitor only" : t == OBS_MONITORING_TYPE_MONITOR_AND_OUTPUT ? "monitor and output" : "none";
+}
+
+static bool collect_report_source(void *param, obs_source_t *s)
+{
+	struct report_sources *r = param;
+	if (!is_audio_input(s))
+		return true;
+	r->total++;
+	if (r->n >= REPORT_MAX_SOURCES)
+		return true;
+	enum fdr_saved saved;
+	enum fdr_state state;
+	char name[FDR_STEM_NAME_MAX];
+	int idx = effective_placement(&r->faders, s, &saved, name, &state);
+	uint32_t mixers = obs_source_get_audio_mixers(s);
+	r->list[r->n++] = (struct fdr_report_source){
+		.name = keep(r, obs_source_get_name(s)),
+		.kind = keep(r, obs_source_get_id(s)),
+		.saved = keep(r, saved == FDR_SAVED_NEW ? "new" : saved == FDR_SAVED_REST ? "rest" : name),
+		.plays = keep(r, idx >= 0 ? r->faders.names[idx] : ""),
+		.state = fdr_state_name(state),
+		.muted = obs_source_muted(s),
+		.monitoring = monitoring_name(obs_source_get_monitoring_type(s)),
+		.tracks = mixers,
+		.on_stream_track = (mixers & r->stream_bit) != 0,
+	};
+	return true;
+}
+
+// The last part of a home folder path: the OS user name as folders spell it.
+static const char *home_user(char *buf, size_t size)
+{
+	const char *home = getenv("HOME") ? getenv("HOME") : getenv("USERPROFILE");
+	if (!home || !*home)
+		return NULL;
+	snprintf(buf, size, "%s", home);
+	size_t n = strlen(buf);
+	while (n > 0 && (buf[n - 1] == '/' || buf[n - 1] == '\\'))
+		buf[--n] = 0;
+	const char *a = strrchr(buf, '/'), *b = strrchr(buf, '\\');
+	const char *last = a > b ? a : b;
+	return last ? last + 1 : buf;
+}
+
+static int utc_offset_minutes(time_t now)
+{
+	struct tm lt, gt;
+#ifdef _WIN32
+	localtime_s(&lt, &now);
+	gmtime_s(&gt, &now);
+#else
+	localtime_r(&now, &lt);
+	gmtime_r(&now, &gt);
+#endif
+	gt.tm_isdst = lt.tm_isdst;
+	return (int)(difftime(mktime(&lt), mktime(&gt)) / 60.0);
+}
+
+// Build the report. true: *report is it (bfree() it). false: *error says why there is none.
+static bool debug_report(bool names, char **report, const char **error)
+{
+	*report = NULL;
+	*error = NULL;
+	static struct report_sources r; // large: off the stack (UI thread, or a test's main thread)
+	memset(&r, 0, sizeof(r));
+	obs_data_t *settings = obs_source_get_settings(settings_source);
+	fdr_uplink_status st;
+	get_status(&st);
+	current_faders(settings, &r.faders);
+	int track = forced_stream_track ? forced_stream_track : frontend_loaded ? stream_audio_track() : 0;
+	r.stream_bit = 1u << ((track ? track : 1) - 1);
+	obs_enum_sources(collect_report_source, &r);
+
+	struct fdr_report_fader faders[FDR_MAX_FADERS];
+	for (int i = 0; i < r.faders.list.n; i++)
+		faders[i] = (struct fdr_report_fader){r.faders.names[i], i < r.faders.list.open};
+	static struct fdr_log_line log[FDR_LOG_LINES];
+	uint64_t log_total = 0;
+	int n_log = fdr_logring_copy(log, FDR_LOG_LINES, &log_total);
+
+	struct obs_audio_info ai = {0};
+	obs_get_audio_info(&ai);
+	char *config_dir = obs_module_config_path("");
+	const char *module_dir = obs_get_module_binary_path(obs_current_module());
+	// The stream key is read only to scrub it from the report, never to put it in.
+	char *stream_key = NULL;
+	if (frontend_loaded) {
+		obs_service_t *svc = obs_frontend_get_streaming_service();
+		const char *k = svc ? obs_service_get_connect_info(svc, OBS_SERVICE_CONNECT_INFO_STREAM_KEY) : NULL;
+		stream_key = k && *k ? bstrdup(k) : NULL;
+	}
+	char home[512];
+	const char *key = obs_data_get_string(settings, "key");
+	const char *server = obs_data_get_string(settings, "server");
+	const char *account = obs_data_get_string(settings, "account");
+	bool remembered = *account && strcmp(obs_data_get_string(settings, "account_key"), key_tail(key)) == 0;
+	const char *plan = st.plan[0] ? st.plan : remembered ? obs_data_get_string(settings, "account_plan") : "";
+	const char *allow_plan = NULL;
+	time_t now = time(NULL);
+	uint64_t now_ns = os_gettime_ns();
+	struct fdr_report_input in = {
+		.names = names,
+		.now = (int64_t)now,
+		.utc_offset_min = utc_offset_minutes(now),
+		.plugin_version = FDR_VERSION_STR,
+		.plugin_uptime_s = (int64_t)((now_ns - loaded_ns) / 1000000000ULL),
+		.update_available = pending_update(settings) ? pending_update(settings) : "",
+		.config_dir = config_dir ? config_dir : "",
+		.module_dir = module_dir ? module_dir : "",
+		.obs_version = obs_get_version_string(),
+		.obs_locale = obs_get_locale(),
+		.streaming = streaming,
+		.stream_uptime_s = streaming && stream_started_ns ? (int64_t)((now_ns - stream_started_ns) / 1000000000ULL) : 0,
+		.stream_audio_track = track,
+		.sample_rate = (int)ai.samples_per_sec,
+		.channels = (int)get_audio_channels(ai.speakers),
+		.mixer_ok = !mixer_unavailable && ai.samples_per_sec == 48000 && ai.speakers == SPEAKERS_STEREO,
+		.enabled = obs_data_get_bool(settings, "enabled"),
+		.only_live = obs_data_get_bool(settings, "only_live"),
+		.plugin_key_set = *key != 0,
+		.channel = st.channel[0] ? st.channel : remembered ? account : "",
+		.plan = plan,
+		.platforms = st.platforms,
+		.listener_limit = st.listener_limit,
+		.max_stems = st.max_stems,
+		.running = st.running,
+		.connected = st.connected,
+		.ever_connected = st.ever_connected,
+		.server = strcmp(server, DEFAULT_SERVER) == 0 ? DEFAULT_SERVER : "custom",
+		.listeners = st.listeners,
+		.uplink_kbps = st.uplink_kbps,
+		.stems_on_wire = st.stems,
+		.stream_track = st.stream_track,
+		.stream_track_silent = st.stream_track_silent,
+		.chunks_sent = st.chunks_sent,
+		.last_failure = st.failure,
+		.rejected_status = st.rejected_status,
+		.mix_mismatch = st.mix_mismatch,
+		.mix_duplicate = st.mix_duplicate,
+		.faders = faders,
+		.n_faders = r.faders.list.n,
+		.allowance = known_allowance(settings, &st, &allow_plan),
+		.sources = r.list,
+		.n_sources = r.n,
+		.audio_total = r.total,
+		.past_limit = r.total > FDR_MAX_AUDIO_SOURCES ? r.total - FDR_MAX_AUDIO_SOURCES : 0,
+		.log = log,
+		.n_log = n_log,
+		.log_total = log_total,
+		.redact = {.plugin_key = key, .stream_key = stream_key, .user_names = {getenv("USER") ? getenv("USER") : getenv("USERNAME"), home_user(home, sizeof(home))}},
+	};
+	fdr_sysinfo_get(&in.sys);
+	char *text = NULL;
+	bool ok = fdr_report_build(&in, &text) == 0;
+	if (ok) {
+		*report = bstrdup(text);
+		free(text);
+	} else {
+		*error = "Couldn't build a safe report: your plugin key or stream key would have been in it.";
+		fdr_log(LOG_WARNING, "debug report refused: a key would have been in it");
+	}
+	if (stream_key) {
+		memset(stream_key, 0, strlen(stream_key));
+		bfree(stream_key);
+	}
+	bfree(config_dir);
+	for (int i = 0; i < r.n_strings; i++)
+		bfree(r.strings[i]);
+	obs_data_release(settings);
+	return ok;
+}
+
+static void proc_debug_report(void *unused, calldata_t *cd)
+{
+	UNUSED_PARAMETER(unused);
+	char *report = NULL;
+	const char *error = NULL;
+	bool ok = debug_report(calldata_bool(cd, "names"), &report, &error);
+	calldata_set_bool(cd, "ok", ok);
+	calldata_set_string(cd, "report", report ? report : "");
+	calldata_set_string(cd, "error", error ? error : "");
+	bfree(report);
+}
+
+static void log_to_obs(int level, const char *msg)
+{
+	blog(level, "[faders] %s", msg);
+}
+
 bool obs_module_load(void)
 {
+	loaded_ns = os_gettime_ns();
+	fdr_log_set_sink(log_to_obs);
 	obs_register_source(&settings_source_info);
 
 	char *path = config_file();
@@ -1742,6 +1964,7 @@ bool obs_module_load(void)
 	proc_handler_add(ph, "void faders_placement(in string source, out string saved, out string effective, out string state)", proc_placement, NULL);
 	proc_handler_add(ph, "void faders_frontend_event(in int event)", proc_frontend_event, NULL);
 	proc_handler_add(ph, "void faders_dialog_opens(out int n)", proc_dialog_opens, NULL);
+	proc_handler_add(ph, "void faders_debug_report(in bool names, out bool ok, out string report, out string error)", proc_debug_report, NULL);
 	proc_handler_add(ph, "void faders_status(out string status)", proc_status, NULL);
 	proc_handler_add(ph, "void faders_dialog(out string rows)", proc_dialog, NULL);
 	proc_handler_add(ph, "void faders_dialog_set(in string key, in string choice, out bool ok, out int redraws_during_update)", proc_dialog_set, NULL);
@@ -1755,7 +1978,7 @@ bool obs_module_load(void)
 	obs_frontend_add_event_callback(on_frontend_event, NULL);
 	connect_source_signals(true);
 	obs_add_tick_callback(watch_status, NULL);
-	blog(LOG_INFO, "[faders] loaded (version %s)", FDR_VERSION_STR);
+	fdr_log(LOG_INFO, "loaded (version %s)", FDR_VERSION_STR);
 	return true;
 }
 

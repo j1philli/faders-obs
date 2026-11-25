@@ -20,7 +20,7 @@ set(GEN "${CMAKE_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${GEN}")
 file(WRITE "${GEN}/obsconfig.h" "#pragma once\n#define OBS_RELEASE_CANDIDATE 0\n#define OBS_BETA 0\n")
 
-set(FADERS_SOURCES src/plugin-main.c src/uplink.c src/mixer.c src/placement.c)
+set(FADERS_SOURCES src/plugin-main.c src/uplink.c src/mixer.c src/placement.c src/logring.c src/redact.c src/report.c src/sysinfo.c)
 set(OBS_INCLUDES "${GEN}" "${OBS_SRC}/libobs" "${OBS_SRC}/frontend/api" "${SIMDE_INCLUDE}")
 
 if(APPLE)
@@ -75,7 +75,7 @@ elseif(WIN32)
     set(MINGW_SHIM "-include${CMAKE_SOURCE_DIR}/compat/mingw-msvc-intrinsics.h")
     target_compile_options(faders PRIVATE ${MINGW_SHIM})
   endif()
-  target_link_libraries(faders PRIVATE ${OBS_IMPORT_LIBS} "${OPUS_LIB}" winhttp)
+  target_link_libraries(faders PRIVATE ${OBS_IMPORT_LIBS} "${OPUS_LIB}" winhttp advapi32)
   # OBS layout: obs-plugins/64bit/faders.dll + data/obs-plugins/faders/locale/*.ini
   set_target_properties(faders PROPERTIES PREFIX "" OUTPUT_NAME faders)
   add_custom_command(TARGET faders POST_BUILD
