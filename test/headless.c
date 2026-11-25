@@ -94,7 +94,18 @@ static void *wav_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct wav_src *w = bzalloc(sizeof(*w));
 	w->source = source;
-	if (!load_wav(obs_data_get_string(settings, "path"), &w->samples, &w->count)) {
+	if (obs_data_get_bool(settings, "noise")) {
+		// 2 s of seeded white noise: audio no WAV in media/ correlates with.
+		w->count = 96000;
+		w->samples = malloc(w->count * sizeof(int16_t));
+		uint32_t x = 0x2545F491u;
+		for (size_t i = 0; i < w->count; i++) {
+			x ^= x << 13;
+			x ^= x >> 17;
+			x ^= x << 5;
+			w->samples[i] = (int16_t)(((int32_t)(x >> 16) - 32768) / 4);
+		}
+	} else if (!load_wav(obs_data_get_string(settings, "path"), &w->samples, &w->count)) {
 		fprintf(stderr, "cannot read %s\n", obs_data_get_string(settings, "path"));
 		exit(2);
 	}
@@ -245,11 +256,13 @@ int main(int argc, char **argv)
 	}
 
 	// FADERS_MISMATCH_NAME: one more source with that name, put on Voice and included although it
-	// is in no output (the test hook), so the mixer reports it to the hub as a mismatch.
+	// is in no output (the test hook), so the mixer reports it to the hub as a mismatch. It plays
+	// its own noise: a copy of a real source's audio correlates with that source as much as with
+	// itself, and the mixer could report the real source instead.
 	obs_source_t *mismatched = NULL;
 	if (getenv("FADERS_MISMATCH_NAME")) {
 		obs_data_t *s = obs_data_create();
-		obs_data_set_string(s, "path", argv[5]);
+		obs_data_set_bool(s, "noise", true);
 		mismatched = obs_source_create("faders_test_wav", getenv("FADERS_MISMATCH_NAME"), s, NULL);
 		obs_data_release(s);
 		obs_source_set_audio_mixers(mismatched, 1u << (stream_track - 1));
