@@ -148,6 +148,7 @@ else()
     target_compile_options(faders-mixtest PRIVATE ${MINGW_SHIM})
   endif()
 endif()
+target_sources(faders-mixtest PRIVATE test/panel-migration-rest.c)
 add_dependencies(faders-mixtest faders)
 
 enable_testing()
