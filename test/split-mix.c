@@ -337,7 +337,10 @@ static void run_split(const char *server, const char *key)
 	result(warned("youtube-source-not-on-track") && warned("youtube-source-on-twitch-track") && num("f_youtube_rms") < 1e-4 && close_to(num("ee_twitch_rms"), R_YT, 0.03),
 	       "split 9 warnings: YouTube source on the wrong track", "%s; F@youtube %.4f, EE@twitch %.4f (want %.4f)", strstr(stats, "\"warnings\"") ? strstr(stats, "\"warnings\"") : stats,
 	       num("f_youtube_rms"), num("ee_twitch_rms"), R_YT);
-	// The per-platform oracle: forced in although it isn't on the YouTube track, it is dropped.
+	obs_source_set_audio_mixers(yt, 4);
+	// The per-platform oracle: on Track 3 but in no output, so YouTube doesn't air it, and forced in
+	// by the test hook (as a gating bug would): it is dropped and YouTube's warning says so.
+	obs_set_output_source(3, NULL);
 	obs_data_t *priv = obs_source_get_private_settings(yt);
 	obs_data_set_bool(priv, "faders_test_force", true);
 	obs_data_release(priv);
@@ -352,11 +355,13 @@ static void run_split(const char *server, const char *key)
 		fetch();
 		dropped = flag("youtube_dropped");
 	}
+	pump_for(700);
+	fetch();
 	result(dropped && warned("youtube-source-not-on-track"), "split 10 the YouTube oracle drops a source YouTube doesn't air", "dropped %d; %s", dropped, stats);
-	obs_source_set_audio_mixers(yt, 4);
 	priv = obs_source_get_private_settings(yt);
 	obs_data_erase(priv, "faders_test_force");
 	obs_data_release(priv);
+	obs_set_output_source(3, yt);
 
 	// Downgrade: the hub says Free. The split turns off (today's layers), picks kept.
 	printf("STEP hello-free\n");
@@ -371,7 +376,7 @@ static void run_split(const char *server, const char *key)
 	printf("STEP hello-pro\n");
 	fflush(stdout);
 	bool back = wait_split(true);
-	pump_for(2500); // the dropped source was forgiven by the rebuild; let it settle
+	pump_for(2500); // turning on again starts the YouTube oracle over; let it settle
 	window(500, 1500);
 	result(back && num("stems") == 5 && close_to(num("f_youtube_rms"), R_YT, 0.05) && close_to(num("f_twitch_rms"), R_TW, 0.03), "split 12 Pro again: on with the same picks",
 	       "back %d, F@youtube %.4f F@twitch %.4f; %s", back, num("f_youtube_rms"), num("f_twitch_rms"), stats);

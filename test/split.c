@@ -38,7 +38,7 @@ static bool start_as(const char *name, const char *plan, const char *platforms, 
 	snprintf(json, sizeof(json), PRO_SETTINGS, plan, platforms, faders, extra ? extra : "");
 	if (!start(name, json))
 		return false;
-	configure("Voice,Game,Music", false);
+	configure("Voice,Game,Music", true); // the mixer runs (nothing answers at the server)
 	return true;
 }
 
@@ -129,11 +129,17 @@ static bool offers(const char *key, const char *choice)
 	t2 = t2 ? strchr(t2 + 1, '\t') : NULL;
 	if (!t2)
 		return false;
+	// A choice is offered when one starts with it (NEW sources say " (new)" after the name).
 	char want[256];
-	snprintf(want, sizeof(want), "|%s|", choice);
+	snprintf(want, sizeof(want), "|%s", choice);
 	char have[8192];
 	snprintf(have, sizeof(have), "|%s|", t2 + 1);
-	return strstr(have, want) != NULL;
+	for (const char *p = have; (p = strstr(p, want)); p++) {
+		char after = p[strlen(want)];
+		if (after == '|' || (after == ' ' && p[strlen(want) + 1] == '('))
+			return true;
+	}
+	return false;
 }
 static bool pick_split(const char *key, const char *choice)
 {
@@ -407,7 +413,7 @@ static void scenario_counts(void)
 	snprintf(json, sizeof(json), PRO_SETTINGS, "pro", "twitch,youtube", 2, "");
 	if (!start("split-counts", json))
 		return;
-	configure("Voice,Music,Game", false);
+	configure("Voice,Music,Game", true);
 	obs_source_t *spotify = make("wasapi_process_output_capture", "Spotify");
 	obs_source_t *ytm = make("browser_source", "YT Music");
 	obs_source_t *game = make("game_capture", "Game Capture");
