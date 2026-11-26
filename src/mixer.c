@@ -310,9 +310,9 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 	// copies whichever scene sits in slot A, which is the old scene until the video side (at
 	// frame rate) ends the transition and swaps them, and the swap can land between the
 	// transition's audio render and this callback. So for ticks past the end, and until A's
-	// sources have gone inactive, the two candidates (old scene in full, new scene in full)
-	// are held back and the one that matches the transition source's own output this tick
-	// is used.
+	// sources have gone inactive (including the tick they go inactive on), the two candidates
+	// (old scene in full, new scene in full) are held back and the one that matches the
+	// transition source's own output this tick is used.
 	bool ambiguous = fading && (m->fade.stopped || ts >= m->fade.start_ns + m->fade.dur_ns);
 	static float cand[2][CH][FRAMES];
 	static int8_t side[MAX_ENTRIES]; // 0 = A-only candidate, 1 = B-only, -1 = decided already
@@ -323,8 +323,10 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 	// every source whose buffer is kept stays referenced until the tick is done.
 	static obs_source_t *held[MAX_ENTRIES + 1];
 	int n_held = 0;
+	bool tout_read = false; // the transition's buffer, read (and held) at most once per tick
 	if (ambiguous) {
 		obs_source_t *t = m->tr ? obs_weak_source_get_source(m->tr) : NULL;
+		tout_read = true;
 		if (t) {
 			obs_source_get_audio_mix(t, &tmix);
 			tout_l = tmix.output[m->mix_idx].data[0];
@@ -337,9 +339,13 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 	}
 	int n = snap ? snap->n : 0;
 	bool a_alive = false; // after a stop: is any A-only source still active?
+	static bool one_side[MAX_ENTRIES]; // in exactly one of the fade's trees (mixed by the transition)
+	static bool arrived[MAX_ENTRIES];  // the incoming side's first tick, held back (see below)
+	int n_arrived = 0;
 	for (int k = 0; k < n; k++) {
 		struct entry *e = &snap->e[k];
 		inc[k] = false;
+		one_side[k] = arrived[k] = false;
 		// Every path that skips this entry must leave no stale "held back" mark or pointers from
 		// an earlier tick (the entries behind an index change when sources come and go).
 		side[k] = -1;
@@ -355,6 +361,7 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 		slot->ats = ats;
 		slot->active = active;
 		bool in_a = fading && in_set(m->fade.a, m->fade.na, s), in_b = fading && in_set(m->fade.b, m->fade.nb, s);
+		one_side[k] = in_a != in_b;
 		if (in_a && !in_b && active)
 			a_alive = true;
 		// Ending a transition moves B from its slot to A's, which deactivates and reactivates
@@ -364,11 +371,20 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 			active = true;
 			slot->active = true;
 		}
+		// The same swap takes A out of the program, and it can land after libobs mixed this tick
+		// with the old scene in full (its audio side had ended, the video side hadn't) and before
+		// this callback: A's sources then read inactive for a tick libobs played. So in the
+		// ambiguous window an A-only source that was active last tick is still a candidate this
+		// tick; the transition's output decides, as for every candidate. Only for this tick:
+		// slot->active keeps the real state, so the next tick gates it as inactive.
+		if (ambiguous && in_a && !in_b && was_active && !active)
+			active = true;
 		if (e->fader == REST) { // Everything else: whatever the stream has of it is in the residual
 			why[k] = 'R';
 			obs_source_release(s);
 			continue;
 		}
+		bool arriving = false;
 		if (!e->force) {
 			// The gate: what libobs mixed into the streamed track this tick, from frame 0.
 			if (!active || !(obs_source_get_audio_mixers(s) & m->stream_bit) ||
@@ -377,12 +393,21 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 				obs_source_release(s);
 				continue;
 			}
-			if (!near(was, ts) || !was_active) {
+			// The incoming side of a modelled fade, on its first active tick. libobs activates B
+			// just before it signals transition_start, and every audio source is rendered every
+			// tick, active or not, so B's buffer and timestamps are this tick's. Whether libobs
+			// mixed B into this tick (at B × t) depends on where the start fell, and a scene that
+			// has never been in the program can be left out of its first tick. So B's modelled
+			// contribution is held back and the transition's own output decides (after the loop).
+			arriving = !was_active && fading && !m->fade.stopped && in_b && !in_a;
+			if (!near(was, ts) || (!was_active && !arriving)) {
 				why[k] = !was_active ? 'A' : 'r';
 				// First tick of this source (or a resync): offset unknown, leave it to the residual.
-				// Also the tick a source becomes active: a scene switched in by a transition is
-				// mixed by libobs at t ≈ 0 before our transition_start handler has run, and a cut
-				// is one tick of Everything else.
+				// Also the tick a source becomes active outside a fade's incoming side: whether
+				// libobs mixed it this tick is unknown, and there is no transition output to ask, so
+				// a cut is one tick of Everything else. Neither end of a fade is left here: the
+				// incoming side's first tick and the old scene's last tick are decided by the
+				// transition's output (see above and below).
 				m->st.gated_new[k]++;
 				obs_source_release(s);
 				continue;
@@ -426,6 +451,15 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 			c_l = f_l;
 			c_r = f_r;
 		}
+		if (arriving) {
+			contrib[k][0] = c_l;
+			contrib[k][1] = c_r;
+			arrived[k] = true;
+			n_arrived++;
+			why[k] = 'n';
+			held[n_held++] = s;
+			continue;
+		}
 		add_into(dst_l, c_l);
 		add_into(dst_r, c_r);
 		contrib[k][0] = c_l;
@@ -434,6 +468,61 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 		why[k] = per_sample ? 'f' : 'I';
 		m->st.included[k]++;
 		held[n_held++] = s;
+	}
+
+	if (n_arrived) {
+		// Did libobs mix the arriving sources into this tick? The transition's output, less what
+		// the model already has in it (every included source on one side of the fade), is what
+		// they would have to account for: include them when that remainder correlates with them
+		// (⟨r, c⟩ > |c|² / 2, i.e. r is closer to c than to nothing). No transition buffer: leave
+		// them out, as before.
+		if (!tout_read) {
+			obs_source_t *t = m->tr ? obs_weak_source_get_source(m->tr) : NULL;
+			tout_read = true;
+			if (t) {
+				obs_source_get_audio_mix(t, &tmix);
+				tout_l = tmix.output[m->mix_idx].data[0];
+				tout_r = tmix.output[m->mix_idx].data[1];
+				held[n_held++] = t;
+			}
+		}
+		static float model[CH][FRAMES], arr[CH][FRAMES];
+		double rc = 0, cc = 0;
+		if (tout_l && tout_r) {
+			memset(model, 0, sizeof(model));
+			memset(arr, 0, sizeof(arr));
+			for (int k = 0; k < n; k++)
+				for (int c = 0; c < CH; c++) {
+					if (inc[k] && one_side[k])
+						add_into(model[c], contrib[k][c]);
+					else if (arrived[k])
+						add_into(arr[c], contrib[k][c]);
+				}
+			for (int c = 0; c < CH; c++) {
+				const float *to = c ? tout_r : tout_l;
+				for (size_t i = 0; i < FRAMES; i++) {
+					double r = (double)to[i] - model[c][i];
+					rc += r * arr[c][i];
+					cc += (double)arr[c][i] * arr[c][i];
+				}
+			}
+		}
+		bool mixed = tout_l && tout_r && rc > 0.5 * cc;
+		for (int k = 0; k < n; k++) {
+			if (!arrived[k])
+				continue;
+			struct entry *e = &snap->e[k];
+			if (!mixed) {
+				why[k] = 'A';
+				m->st.gated_new[k]++;
+				continue;
+			}
+			add_into(acc[e->fader][0], contrib[k][0]);
+			add_into(acc[e->fader][1], contrib[k][1]);
+			inc[k] = true;
+			m->st.included[k]++;
+			why[k] = 'N';
+		}
 	}
 
 	if (ambiguous) {
@@ -703,6 +792,43 @@ static void track_transition(struct fdr_mixer *m)
 	pthread_mutex_unlock(&m->tr_mu);
 }
 
+// Locked. The oracle's evidence so far (each source's sums for the window in progress, its run of
+// windows and its calm count) carries over to the new snapshot when the rebuild changed nothing it
+// measures: every source in the old snapshot is still there, routed the same way. Sources may have
+// been added (a source list is rebuilt more than once as sources come and go, and each rebuild
+// used to restart every three-window count). Anything else, a source gone, replaced or routed
+// elsewhere, starts every count over, as before: the evidence was about a residual that changed.
+// "Routed" is the fader, force and dropped: a source plays on its one placed fader only (no extra
+// faders from OBS tracks), and whether it is on the streamed track is read live every tick.
+static void carry_oracle(const struct snapshot *old, struct snapshot *snap)
+{
+	if (!old)
+		return;
+	int match[MAX_ENTRIES];
+	for (int i = 0; i < old->n; i++) {
+		const struct entry *o = &old->e[i];
+		obs_source_t *s = obs_weak_source_get_source(o->weak);
+		match[i] = -1;
+		// Sources keep their order when others are added, so look where it was first.
+		for (int j = 0; s && j < snap->n && match[i] < 0; j++) {
+			int k = (i + j) % snap->n;
+			const struct entry *e = &snap->e[k];
+			if (obs_weak_source_references_source(e->weak, s) && e->fader == o->fader && e->force == o->force && e->dropped == o->dropped)
+				match[i] = k;
+		}
+		obs_source_release(s);
+		if (match[i] < 0)
+			return;
+	}
+	for (int i = 0; i < old->n; i++) {
+		struct entry *e = &snap->e[match[i]];
+		e->xy = old->e[i].xy;
+		e->xx = old->e[i].xx;
+		e->run = old->e[i].run;
+		e->calm = old->e[i].calm;
+	}
+}
+
 void fdr_mixer_rebuild(fdr_mixer_t *m)
 {
 	if (!m)
@@ -713,6 +839,7 @@ void fdr_mixer_rebuild(fdr_mixer_t *m)
 	struct collect c = {m, snap};
 	obs_enum_sources(collect_cb, &c);
 	struct snapshot *old = m->snap;
+	carry_oracle(old, snap);
 	m->snap = snap;
 	bool warn = snap->overflow && !m->overflow_warned;
 	m->overflow_warned = m->overflow_warned || snap->overflow;

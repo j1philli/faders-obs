@@ -13,12 +13,13 @@
 // procedure for what each fader and Everything else carried. One PASS/FAIL line per case; exits
 // non-zero if any fails. CI runs it (scripts/ci/teamcity-macos.sh).
 //
-//   faders-mixtest <server> <key> [fold|wire]
+//   faders-mixtest <server> <key> [fold|wire|fade-start]
 //   faders-mixtest enumeration
 //
 // "fold": only the plan-cap case; the hub must be sending {"type":"quality","maxStems":2}
 // (mock-hub --kbps 128 --max-stems 2). "wire": no checks; keeps the five sources playing for
-// 25 s so test/plugin-listener.mjs can check the stems as a listener sees them.
+// 25 s so test/plugin-listener.mjs can check the stems as a listener sees them. "fade-start":
+// only case 7c (a fade's incoming scene, first tick), with libobs's audio buffering off.
 #include <obs.h>
 #include <obs-module.h>
 #include <obs-hotkey.h>
@@ -47,6 +48,10 @@ struct tone {
 	volatile bool stop;
 };
 
+// fade-start (case 7c): tones send this many 10 ms blocks at once, then stay that far ahead of
+// the clock, so a late wake-up can't make one late and have libobs add audio buffering.
+static int tone_lead_blocks;
+
 static void *tone_thread(void *param)
 {
 	struct tone *t = param;
@@ -73,7 +78,8 @@ static void *tone_thread(void *param)
 			.timestamp = t0 + n * 10000000ULL,
 		};
 		obs_source_output_audio(t->source, &a);
-		os_sleepto_ns(t0 + (n + 1) * 10000000ULL);
+		if (n + 1 >= (uint64_t)tone_lead_blocks)
+			os_sleepto_ns(t0 + (n + 1 - (uint64_t)tone_lead_blocks) * 10000000ULL);
 	}
 	return NULL;
 }
@@ -341,6 +347,168 @@ static bool find_ptt_cb(void *data, obs_hotkey_id id, obs_hotkey_t *key)
 	return true;
 }
 
+// ── Case 7a's interleaving: the end of a fade, when the audio side finishes first ────────
+// libobs ends a fade's audio on the first tick past its end and, if the video side hasn't
+// finished, copies the old scene in full from then on. The video thread ends the video side at
+// its next frame: it swaps the scenes, which takes the old one out of the program (inactive). That
+// swap can land after libobs mixed a tick and before the mixer's callback for that tick runs. On
+// its own that's about 1 fade in 40. Here it is forced: the video thread is held in a graphics
+// task (between frames, outside the lock the audio thread shares with rendering), and an audio
+// callback that runs before the plugin's releases it on the first tick past the end and waits
+// for the swap.
+static struct {
+	pthread_mutex_t mu;
+	pthread_cond_t cv;
+	bool hold_video, video_held;
+	volatile bool armed;
+	uint64_t after_ns; // first tick timestamp past the fade's end (t ≥ 1 for libobs)
+	obs_source_t *tr, *old_scene, *old_tone;
+	// 1: libobs mixed the old scene in full this tick and it went inactive before the plugin's
+	// callback; -1: the setup didn't hold (no proof either way).
+	volatile int forced;
+} race = {.mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER};
+static void race_hold_video(void *param)
+{
+	pthread_mutex_lock(&race.mu);
+	while (race.hold_video) {
+		race.video_held = true;
+		pthread_cond_broadcast(&race.cv);
+		pthread_cond_wait(&race.cv, &race.mu);
+	}
+	race.video_held = false;
+	pthread_mutex_unlock(&race.mu);
+}
+static void race_release_video(void)
+{
+	pthread_mutex_lock(&race.mu);
+	race.hold_video = false;
+	pthread_cond_broadcast(&race.cv);
+	pthread_mutex_unlock(&race.mu);
+}
+static void race_audio(void *param, size_t mix_idx, struct audio_data *data)
+{
+	if (!race.armed || data->timestamp < race.after_ns)
+		return;
+	race.armed = false;
+	// The transition's output this tick is the old scene's, sample for sample: libobs has ended
+	// the audio side and copied slot A, and the old scene is still in it.
+	struct obs_source_audio_mix tm, om;
+	obs_source_get_audio_mix(race.tr, &tm);
+	obs_source_get_audio_mix(race.old_scene, &om);
+	bool old_mixed = obs_source_active(race.old_tone) && tm.output[0].data[0] && om.output[0].data[0] &&
+			 memcmp(tm.output[0].data[0], om.output[0].data[0], sizeof(float) * AUDIO_OUTPUT_FRAMES) == 0;
+	race_release_video();
+	uint64_t deadline = os_gettime_ns() + 2000000000ULL;
+	while (obs_source_active(race.old_tone) && os_gettime_ns() < deadline)
+		os_sleep_ms(1);
+	race.forced = old_mixed && !obs_source_active(race.old_tone) ? 1 : -1;
+}
+
+// ── Case 7c: the incoming scene's first tick ────────────────────────────────────────────
+// libobs activates a fade's incoming scene (B) just before it signals transition_start, so the
+// first tick the mixer sees B active in is the first tick rendered after the start, mixed at
+// B × t. How much of it lies past the start depends on where the start falls in the tick and on
+// libobs's audio buffering (a tick is rendered that long after it ends): from nothing up to a
+// tick. So 7c runs on its own (`fade-start`), in a process whose audio has no buffering, and
+// starts each fade just after the plugin has finished a tick: most of the next tick then lies
+// past the start, every run. after_plugin is connected before the plugin taps the track, so
+// libobs calls it after the plugin's callback (it walks a mix's callbacks last to first): when
+// it signals, the plugin is done with that tick.
+#define TICK_NS ((uint64_t)AUDIO_OUTPUT_FRAMES * 1000000000ULL / RATE)
+static struct {
+	pthread_mutex_t mu;
+	pthread_cond_t cv;
+	bool armed;
+	uint64_t done, end_ns; // ticks signalled; the last one's end timestamp
+	int64_t lat_ns;         // how long after its end the plugin was done with it (≥ libobs's audio buffering)
+} tick_done = {.mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER};
+static void after_plugin(void *param, size_t mix_idx, struct audio_data *data)
+{
+	pthread_mutex_lock(&tick_done.mu);
+	if (tick_done.armed) {
+		tick_done.armed = false;
+		tick_done.end_ns = data->timestamp + TICK_NS;
+		tick_done.lat_ns = (int64_t)(os_gettime_ns() - tick_done.end_ns);
+		tick_done.done++;
+		pthread_cond_broadcast(&tick_done.cv);
+	}
+	pthread_mutex_unlock(&tick_done.mu);
+}
+// Wait (up to 1 s) for the plugin to finish the next tick: that tick's end timestamp, or 0.
+static uint64_t next_tick_done(void)
+{
+	pthread_mutex_lock(&tick_done.mu);
+	tick_done.armed = true;
+	uint64_t want = tick_done.done + 1;
+	struct timespec dl;
+	clock_gettime(CLOCK_REALTIME, &dl);
+	dl.tv_sec += 1;
+	while (tick_done.done < want)
+		if (pthread_cond_timedwait(&tick_done.cv, &tick_done.mu, &dl) != 0)
+			break;
+	uint64_t end = tick_done.done >= want ? tick_done.end_ns : 0;
+	tick_done.armed = false;
+	pthread_mutex_unlock(&tick_done.mu);
+	return end;
+}
+
+static obs_source_t *tone(const char *name, double freq, double amp, uint32_t mixers);
+static void assign(const char *source, const char *fader);
+// Three fades, A → B → A → B, each started just after a tick: Everything else must stay below
+// −60 dBFS in the incoming scene's first tick and over the rest of each fade.
+static void case_7c(bool have_transitions)
+{
+	if (!have_transitions) {
+		result(false, "7c incoming scene's first tick", "obs-transitions module not available");
+		return;
+	}
+	obs_source_t *ta = tone("start-a-tone", 990, 0.3, 1), *tb = tone("start-b-tone", 1210, 0.3, 1);
+	assign("start-a-tone", "Voice");
+	assign("start-b-tone", "Voice");
+	obs_scene_t *sa = obs_scene_create("start A"), *sb = obs_scene_create("start B");
+	obs_scene_add(sa, ta);
+	obs_scene_add(sb, tb);
+	obs_source_t *tr = obs_source_create("fade_transition", "fade", NULL, NULL);
+	obs_set_output_source(0, tr);
+	obs_transition_set(tr, obs_scene_get_source(sa));
+	os_sleep_ms(1500);
+	for (int leg = 0; leg < 3; leg++) {
+		obs_source_t *in = leg & 1 ? ta : tb, *out = leg & 1 ? tb : ta;
+		obs_scene_t *to = leg & 1 ? sa : sb;
+		bool in_was_inactive = !obs_source_active(in);
+		uint64_t before_end = next_tick_done();
+		obs_transition_start(tr, OBS_TRANSITION_MODE_AUTO, 300, obs_scene_get_source(to));
+		uint64_t started = os_gettime_ns(); // no earlier than libobs's own start time
+		reset_stats();
+		uint64_t first_end = next_tick_done();
+		fetch_stats();
+		double first_tick = rest_dbfs(), first_ticks = ticks();
+		os_sleep_ms(700);
+		fetch_stats();
+		double rest_of_fade = rest_dbfs();
+		window(500, 600);
+		// The placement held: the incoming scene's first tick is the one right after the tick done
+		// before the start, alone in the window, with at least 5 ms of it past the start.
+		bool next = first_end > before_end && first_end - before_end <= TICK_NS + 1000;
+		double past_ms = first_end > started ? (double)(first_end - started) / 1e6 : 0.0;
+		bool placed = in_was_inactive && before_end && next && first_ticks == 1 && past_ms >= 5.0;
+		char name[64];
+		snprintf(name, sizeof(name), "7c incoming scene's first tick (fade %d)", leg + 1);
+		result(placed && first_tick < -60.0 && rest_of_fade < -60.0 && rest_dbfs() < -60.0 && obs_source_active(in) && !obs_source_active(out), name,
+		       "start placed %s (%.1f ms of the tick past it, next tick %s, %g tick(s) measured, audio latency %.1f ms); rest in that tick %.1f dBFS (want < -60), rest of the fade %.1f dBFS (want < -60), after %.1f dBFS; in active=%d out active=%d; mismatch \"%s\"",
+		       placed ? "yes" : "NO", past_ms, next ? "yes" : "NO", first_ticks, (double)tick_done.lat_ns / 1e6, first_tick, rest_of_fade, rest_dbfs(), obs_source_active(in), obs_source_active(out), mismatch());
+	}
+	obs_set_output_source(0, NULL);
+	obs_transition_clear(tr);
+	obs_source_release(tr);
+	obs_source_remove(obs_scene_get_source(sa));
+	obs_source_remove(obs_scene_get_source(sb));
+	obs_scene_release(sa);
+	obs_scene_release(sb);
+	obs_source_release(ta);
+	obs_source_release(tb);
+}
+
 int panel_enumeration(void);
 int test_panel_migration(const char *config_dir, const char *scenario);
 
@@ -350,11 +518,12 @@ int main(int argc, char **argv)
 		return test_panel_migration(argv[2], argv[3]);
 	bool enumeration = argc == 2 && strcmp(argv[1], "enumeration") == 0;
 	if (argc < 3 && !enumeration) {
-		fprintf(stderr, "usage: %s <server> <key> [fold|wire] or %s enumeration\n", argv[0], argv[0]);
+		fprintf(stderr, "usage: %s <server> <key> [fold|wire|fade-start] or %s enumeration\n", argv[0], argv[0]);
 		return 1;
 	}
 	bool fold = argc > 3 && strcmp(argv[3], "fold") == 0;
 	bool wire = argc > 3 && strcmp(argv[3], "wire") == 0;
+	bool fade_start = argc > 3 && strcmp(argv[3], "fade-start") == 0;
 	char config_dir[512];
 	const char *tmp = getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp";
 	snprintf(config_dir, sizeof(config_dir), "%s/%s", tmp, enumeration ? "faders-enumeration-config" : "faders-mixtest-config");
@@ -379,18 +548,27 @@ int main(int argc, char **argv)
 		fprintf(stderr, "obs_reset_video failed\n");
 		return 1;
 	}
-	struct obs_audio_info ai = {.samples_per_sec = RATE, .speakers = SPEAKERS_STEREO};
-	if (!obs_reset_audio(&ai)) {
+	// fade-start: no audio buffering (a maximum under one tick), so a tick is rendered as it ends
+	// (case 7c). Every other run keeps libobs's default, which adds buffering when a source is late.
+	struct obs_audio_info2 ai = {.samples_per_sec = RATE, .speakers = SPEAKERS_STEREO, .max_buffering_ms = fade_start ? 1 : 0};
+	if (!obs_reset_audio2(&ai)) {
 		fprintf(stderr, "obs_reset_audio failed\n");
 		return 1;
 	}
 	obs_register_source(&tone_info);
+	{
+		// Before the plugin taps the track, so libobs runs it after the plugin's callback (case 7c).
+		struct audio_convert_info conv = {.samples_per_sec = RATE, .format = AUDIO_FORMAT_FLOAT_PLANAR, .speakers = SPEAKERS_STEREO, .allow_clipping = true};
+		obs_add_raw_audio_callback(0, &conv, after_plugin, NULL);
+	}
 	bool have_transitions = false;
 	if (FADERS_OBS_TRANSITIONS_BIN[0]) {
 		obs_module_t *tmod = NULL;
 		have_transitions = obs_open_module(&tmod, FADERS_OBS_TRANSITIONS_BIN, FADERS_OBS_TRANSITIONS_DATA) == MODULE_SUCCESS && obs_init_module(tmod);
 	}
 
+	if (fade_start)
+		tone_lead_blocks = 5;
 	// Sources: distinct amplitudes identify them in RMS sums. All on track 1, all active.
 	const double A_VOICE = 0.5, A_GAME = 0.4, A_MUSIC = 0.3, A_DISCORD = 0.2, A_EXTRA = 0.25;
 	obs_source_t *voice = tone("voice", 440, A_VOICE, 1), *game = tone("game", 660, A_GAME, 1), *music = tone("music", 880, A_MUSIC, 1),
@@ -447,6 +625,12 @@ int main(int argc, char **argv)
 				calldata_free(&st);
 			}
 		}
+		goto teardown;
+	}
+	if (fade_start) {
+		assign("extra", "Discord"); // every tone in a fader: Everything else is silent but for leaks
+		os_sleep_ms(800);
+		case_7c(have_transitions);
 		goto teardown;
 	}
 	if (fold) {
@@ -636,6 +820,45 @@ int main(int argc, char **argv)
 		window(500, 600);
 		result(during < -40.0 && rest_dbfs() < -60.0 && !obs_source_active(ta) && obs_source_active(tb), "7 fade 300 ms: residual with the per-sample model",
 		       "rest during the fade %.1f dBFS (want < -40), after %.1f dBFS; A active=%d B active=%d; mismatch \"%s\"", during, rest_dbfs(), obs_source_active(ta), obs_source_active(tb), mismatch());
+		// ── 7a: the fade's last tick, when the video side ends it a moment late ─────────
+		// Back from B to A, with the interleaving forced (race_audio above): libobs mixes B (the
+		// old scene) in full on the first tick past the end, then B goes inactive before the
+		// plugin sees that tick. That tick must reach Voice, not Everything else. Connected after
+		// the plugin's tap, so libobs calls it first (it walks a mix's callbacks last to first).
+		{
+			struct audio_convert_info conv = {.samples_per_sec = RATE, .format = AUDIO_FORMAT_FLOAT_PLANAR, .speakers = SPEAKERS_STEREO, .allow_clipping = true};
+			race.tr = tr;
+			race.old_scene = obs_scene_get_source(sb);
+			race.old_tone = tb;
+			race.forced = 0;
+			obs_add_raw_audio_callback(0, &conv, race_audio, NULL);
+			os_sleep_ms(500);
+			// Hold the video thread before the fade starts, so its video side can't end first.
+			pthread_mutex_lock(&race.mu);
+			race.hold_video = true;
+			pthread_mutex_unlock(&race.mu);
+			obs_queue_task(OBS_TASK_GRAPHICS, race_hold_video, NULL, false);
+			pthread_mutex_lock(&race.mu);
+			while (!race.video_held)
+				pthread_cond_wait(&race.cv, &race.mu);
+			pthread_mutex_unlock(&race.mu);
+			reset_stats();
+			obs_transition_start(tr, OBS_TRANSITION_MODE_AUTO, 300, obs_scene_get_source(sa));
+			race.after_ns = os_gettime_ns() + 300000000ULL;
+			race.armed = true;
+			for (int i = 0; i < 300 && race.forced == 0; i++)
+				os_sleep_ms(10);
+			race.armed = false;
+			race_release_video(); // whatever happened, never leave the video thread held
+			os_sleep_ms(300);
+			fetch_stats();
+			double during_a = rest_dbfs();
+			obs_remove_raw_audio_callback(0, race_audio, NULL);
+			window(500, 600);
+			result(race.forced == 1 && during_a < -40.0 && rest_dbfs() < -60.0 && obs_source_active(ta) && !obs_source_active(tb), "7a fade's last tick: old scene went inactive late",
+			       "interleaving forced %s; rest during the fade %.1f dBFS (want < -40), after %.1f dBFS; A active=%d B active=%d; mismatch \"%s\"", race.forced == 1 ? "yes" : "NO", during_a, rest_dbfs(),
+			       obs_source_active(ta), obs_source_active(tb), mismatch());
+		}
 		// ── 7b: a long Fade to Color must not cost a source its fader ───────────────────
 		// Fade to Color takes A out by the switch point and brings B in after it, so for the whole
 		// transition both have less gain than the linear crossfade the mixer assumes. That
@@ -760,19 +983,26 @@ int main(int argc, char **argv)
 	obs_source_set_audio_mixers(twin_b, 1);
 	assign("twin-a", "Voice");
 	obs_sceneitem_t *twin_a_item = obs_scene_add(many, twin_a), *twin_b_item = obs_scene_add(many, twin_b);
-	// Three windows in a row (1.5 to 2 s) from the last time the source list was rebuilt, and
-	// adding two sources can rebuild it more than once: wait for the warning, not a fixed time.
-	for (int i = 0; i < 80; i++) {
+	// Three windows in a row (1.5 to 2 s) once both play. Rebuilding the source list meanwhile
+	// keeps the count (test/oracle-streak.c), but windows where the two copies reach the mix far
+	// enough apart take r under 0.5 and start it over: wait for the warning, not a fixed time.
+	// It normally comes within a few seconds, but on a busy CI agent (TeamCity #6508) the run of
+	// windows can take longer than the old 8 s, so poll against a wall-clock deadline well past
+	// that. The warning is sticky (withdrawn only after ORACLE_CALM quiet windows), so the checks
+	// below still see it once it is up.
+	uint64_t twin_t0 = os_gettime_ns(), twin_deadline = twin_t0 + 20000000000ULL;
+	double twin_warn_ms = -1;
+	do {
 		os_sleep_ms(100);
 		fetch_stats();
 		if (duplicate_is("twin-a"))
-			break;
-	}
+			twin_warn_ms = (double)(os_gettime_ns() - twin_t0) / 1e6;
+	} while (twin_warn_ms < 0 && os_gettime_ns() < twin_deadline);
 	window(300, 800);
 	double voice_twin = sqrt(R_VOICE * R_VOICE + TONE_RMS(0.2) * TONE_RMS(0.2));
 	result(duplicate_is("twin-a") && !source_dropped("twin-a") && mismatch()[0] == 0 && close_to(fader_rms("Voice"), voice_twin, 0.03) && close_to(rest_rms(), TONE_RMS(0.2), 0.05),
-	       "11 same audio from two sources: warned, not moved", "duplicate twin-a %d, dropped %d, mismatch \"%s\", Voice %.4f (want %.4f), rest %.4f (want %.4f: the other copy)", duplicate_is("twin-a"),
-	       source_dropped("twin-a"), mismatch(), fader_rms("Voice"), voice_twin, rest_rms(), TONE_RMS(0.2));
+	       "11 same audio from two sources: warned, not moved", "duplicate twin-a %d (warned after %.0f ms, want ≤ 20000), dropped %d, mismatch \"%s\", Voice %.4f (want %.4f), rest %.4f (want %.4f: the other copy)",
+	       duplicate_is("twin-a"), twin_warn_ms, source_dropped("twin-a"), mismatch(), fader_rms("Voice"), voice_twin, rest_rms(), TONE_RMS(0.2));
 	obs_sceneitem_remove(twin_b_item);
 	window(4500, 600);
 	result(duplicate_is("") && !source_dropped("twin-a") && close_to(fader_rms("Voice"), voice_twin, 0.03) && rest_dbfs() < -60.0, "11b warning withdrawn once the other copy is gone",
@@ -808,7 +1038,7 @@ int main(int argc, char **argv)
 teardown:
 	for (int c = 0; c < 8; c++)
 		obs_set_output_source(c, NULL);
-	if (!fold && !wire && !enumeration) {
+	if (!fold && !wire && !fade_start && !enumeration) {
 		if (tr) {
 			obs_transition_clear(tr);
 			obs_source_release(tr);

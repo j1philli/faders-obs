@@ -35,6 +35,8 @@ ctest --test-dir build -R '^placement-' --output-on-failure || { echo "##teamcit
 ctest --test-dir build -R '^split-' --output-on-failure || { echo "##teamcity[buildProblem description='split fader: a model, window or wire check failed']"; exit 1; }
 # Debug report: redaction table, log ring, golden reports, fail closed (no hub, never uploaded).
 ctest --test-dir build -R '^debug-' --output-on-failure || { echo "##teamcity[buildProblem description='debug report: a redaction, log ring or report check failed']"; exit 1; }
+# The duplicate warning's three-window rule, tick by tick (test/oracle-streak.c: no audio thread, no clock).
+ctest --test-dir build -R oracle-streak --output-on-failure
 
 # libobs behaviour the virtual mixer relies on (PROTOCOL.md "Virtual mixer"): every check must pass.
 build/faders-mixcheck > mixcheck.log 2>&1 || { grep -E "^(PASS|FAIL|SKIP)" mixcheck.log; echo "##teamcity[buildProblem description='faders-mixcheck: a libobs mixer assumption failed']"; exit 1; }
@@ -92,6 +94,9 @@ grep -q '"mixMismatch"' hub.log && { echo "##teamcity[buildProblem description='
 build/faders-mixtest "ws://127.0.0.1:$PORT/ingest/mix_channel" dev-token > mixtest.log 2>&1 || { grep -E "^(PASS|FAIL|SKIP)" mixtest.log; echo "##teamcity[buildProblem description='faders-mixtest: a virtual-mixer case failed']"; exit 1; }
 grep -E "^(PASS|FAIL|SKIP)" mixtest.log
 grep -q '"mixMismatch":"injected"' hub.log || { echo "##teamcity[buildProblem description='the injected mismatch was not reported to the hub']"; exit 1; }
+# A fade's incoming scene on its first tick (case 7c), in a process with no audio buffering.
+build/faders-mixtest "ws://127.0.0.1:$PORT/ingest/mix_start" dev-token fade-start > mixtest-start.log 2>&1 || { grep -E "^(PASS|FAIL|SKIP)" mixtest-start.log; echo "##teamcity[buildProblem description='faders-mixtest: a fade leaked its incoming scene into Everything else']"; exit 1; }
+grep -E "^(PASS|FAIL|SKIP)" mixtest-start.log
 build/faders-mixtest "ws://127.0.0.1:$PORT/ingest/mix_wire" dev-token wire > mixtest-wire.log 2>&1 &
 HOST=$!
 sleep 5
