@@ -12,7 +12,7 @@
 // headless. Real libobs and the real plugin, no hub (the dialog is built from the settings alone,
 // so nothing connects). Sources are silent stand-ins registered under real source ids
 // (wasapi_input_capture: an Audio Input Capture, e.g. of a virtual cable; browser_source), so the
-// plugin's own rules place them. Each test prints one PASS/FAIL line per case and exits non-zero
+// streamer's placements are all that put them anywhere (a source never placed is NEW). Each test prints one PASS/FAIL line per case and exits non-zero
 // if any fails.
 #pragma once
 #include <obs.h>
@@ -84,26 +84,16 @@ static inline void place(obs_source_t *s, const char *fader)
 	obs_data_set_string(priv, "faders_fader", fader);
 	obs_data_release(priv);
 }
-// Where a source is stored as being: a fader name, "" (Everything else) or "(auto)".
+// Where a source is stored as being: a fader name, "" (Everything else) or "(new)" (never placed).
 static inline const char *placed(obs_source_t *s)
 {
 	static char bufs[4][64];
 	static int next;
 	char *out = bufs[next++ % 4];
 	obs_data_t *priv = obs_source_get_private_settings(s);
-	snprintf(out, sizeof(bufs[0]), "%s", obs_data_has_user_value(priv, "faders_fader") ? obs_data_get_string(priv, "faders_fader") : "(auto)");
+	snprintf(out, sizeof(bufs[0]), "%s", obs_data_has_user_value(priv, "faders_fader") ? obs_data_get_string(priv, "faders_fader") : "(new)");
 	obs_data_release(priv);
 	return out;
-}
-
-// faders_assign_track: a fader name, "" = Everything else, "none" = not used.
-static inline void set_track(int t, const char *v)
-{
-	calldata_t cd = {0};
-	calldata_set_int(&cd, "track", t);
-	calldata_set_string(&cd, "fader", v);
-	call("faders_assign_track", &cd);
-	calldata_free(&cd);
 }
 
 // The dialog as the window builds it (faders_dialog), which is also what a redraw does:

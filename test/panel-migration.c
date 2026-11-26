@@ -58,18 +58,21 @@ static bool check_save(obs_module_t *module, obs_source_t *cable)
 	obs_data_t *saved = obs_save_source(cable);
 	obs_data_t *priv = obs_data_get_obj(saved, "private_settings");
 	char *path = obs_module_get_config_path(module, "settings.json");
-	obs_data_t *settings = obs_data_create_from_json_file(path);
-	bool kept = picked && strcmp(obs_data_get_string(priv, "faders_fader"), "Voice") == 0 &&
-		    obs_data_get_int(saved, "mixers") == VOICE_MIXERS &&
-		    strcmp(obs_data_get_string(settings, "track:5"), "Voice") == 0;
-	printf("%s panel-migration-save: direct Voice assignment and Track 5 round-trip independently\n", kept ? "PASS" : "FAIL");
-	obs_data_release(settings);
+	char *file = os_quick_read_utf8_file(path);
+	// The direct placement and the source's own track ticks are saved; the old track route isn't.
+	bool kept = picked && strcmp(obs_data_get_string(priv, "faders_fader"), "Voice") == 0 && obs_data_get_int(saved, "mixers") == VOICE_MIXERS && file && !strstr(file, "track:");
+	printf("%s panel-migration-save: direct Voice placement and track ticks round-trip; no track:N in settings.json\n", kept ? "PASS" : "FAIL");
+	bfree(file);
 	bfree(path);
 	obs_data_release(priv);
 	obs_data_release(saved);
 	return kept;
 }
 
+// Settings from earlier versions: 0.3.1's track_voice, 0.4.0's track:5 → Voice, and the cable placed
+// directly ("legacy": never placed; "track-only": in Everything else; "map-and-track": on Voice).
+// Tracks place nothing now: the mic and an unplaced cable are NEW in Everything else, and only a
+// direct placement puts the cable on Voice.
 int test_panel_migration(const char *config_dir, const char *scenario)
 {
 	bool legacy = strcmp(scenario, "legacy") == 0;
@@ -101,8 +104,6 @@ int test_panel_migration(const char *config_dir, const char *scenario)
 	if (ready) {
 		char *dir = obs_module_get_config_path(module, "");
 		char *path = obs_module_get_config_path(module, "settings.json");
-		// 0.3.1 exported the custom track selection as an integer. A 0.4.0 user who adds the
-		// track in the new UI has the string route as well. Old keys remain in the file.
 		obs_data_t *saved = obs_data_create_from_json("{\"enabled\":false,\"track_voice\":5}");
 		if (!legacy)
 			obs_data_set_string(saved, "track:5", "Voice");
@@ -116,16 +117,14 @@ int test_panel_migration(const char *config_dir, const char *scenario)
 	const char *rows = NULL;
 	if (ready && proc_handler_call(obs_get_proc_handler(), "faders_dialog", &cd))
 		rows = calldata_string(&cd, "rows");
-	bool direct = rows && strstr(rows, "\tCable Music\tCable Music|Remove from Voice");
-	bool on_track = rows && strstr(rows, "\tOBS Track 5 (everything ticked for it)\tOBS Track 5");
-	bool named = rows && strstr(rows, "\tFrom OBS tracks: Cable Music\n");
-	bool in_rest = rows && strstr(rows, "rest_info\tEverything else: Cable Music");
-	bool mic_shown = rows && strstr(rows, "\tVoice\tMicrophone\t");
-	// Legacy track import was deliberately removed in 0.4.0. The two native input
-	// captures still show as direct rows when they have no 0.4.0 assignment.
-	bool pass = mic_shown && on_track == !legacy && direct == (legacy || both) && named == (!legacy && !both) && !in_rest;
-	printf("%s panel-migration-%s: Voice mic=%d track=%d cable dropdown=%d cable track member=%d cable in Everything else=%d\n",
-	       pass ? "PASS" : "FAIL", scenario, mic_shown, on_track, direct, named, in_rest);
+	bool cable_on_voice = rows && strstr(rows, "\tCable Music\tCable Music|Remove from Voice");
+	bool any_track = rows && (strstr(rows, "OBS Track") || strstr(rows, "From OBS tracks"));
+	bool mic_new = rows && strstr(rows, "Microphone (new)") && !strstr(rows, "\tMicrophone\tMicrophone|");
+	bool cable_rest = rows && (strstr(rows, "Cable Music.") || strstr(rows, "Cable Music,")) && !strstr(rows, "Cable Music (new)");
+	bool cable_new = rows && strstr(rows, "Cable Music (new)");
+	bool pass = rows && !any_track && mic_new && (both ? cable_on_voice : legacy ? cable_new : cable_rest);
+	printf("%s panel-migration-%s: mic NEW=%d, cable on Voice=%d / placed in Everything else=%d / NEW=%d, OBS track rows=%d\n", pass ? "PASS" : "FAIL", scenario, mic_new,
+	       cable_on_voice, cable_rest, cable_new, any_track);
 	if (!pass && rows)
 		fputs(rows, stdout);
 	calldata_free(&cd);

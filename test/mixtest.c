@@ -34,7 +34,6 @@
 #include <math.h>
 #include <stdarg.h>
 
-bool test_panel_migration_rest(obs_source_t *source, const char *earlier_assignment);
 
 #define RATE 48000
 // A tone's stereo RMS for amplitude a: left = a·sin, right = a/2·sin → sqrt((1 + 1/4) / 2) / sqrt(2).
@@ -148,16 +147,6 @@ static void assign(const char *source, const char *fader)
 	calldata_set_string(&cd, "source", source);
 	calldata_set_string(&cd, "fader", fader);
 	call("faders_assign", &cd);
-	calldata_free(&cd);
-}
-
-// Stats: fetch the JSON once (resets the plugin's window) and pick values out of it.
-static void assign_track(int track, const char *fader)
-{
-	calldata_t cd = {0};
-	calldata_set_int(&cd, "track", track);
-	calldata_set_string(&cd, "fader", fader);
-	call("faders_assign_track", &cd);
 	calldata_free(&cd);
 }
 
@@ -538,6 +527,11 @@ int main(int argc, char **argv)
 	char config_dir[512];
 	const char *tmp = getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp";
 	snprintf(config_dir, sizeof(config_dir), "%s/%s", tmp, enumeration ? "faders-enumeration-config" : "faders-mixtest-config");
+	// Fresh settings each run: a plan remembered from an earlier run (the fold case's 2 faders)
+	// would lock faders and refuse the placements below.
+	char old_settings[600];
+	snprintf(old_settings, sizeof(old_settings), "%s/faders/settings.json", config_dir);
+	os_unlink(old_settings);
 	ui_thread = pthread_self();
 	if (!obs_startup("en-US", config_dir, NULL)) {
 		fprintf(stderr, "obs_startup failed\n");
@@ -616,7 +610,7 @@ int main(int argc, char **argv)
 	assign("game", "Game");
 	assign("music", "Music");
 	assign("discord", "Discord");
-	// "extra" stays automatic: a test tone has no rule, so it is Everything else.
+	// "extra" is never placed: it is NEW and plays in Everything else.
 
 	const double R_VOICE = TONE_RMS(A_VOICE), R_GAME = TONE_RMS(A_GAME), R_MUSIC = TONE_RMS(A_MUSIC), R_DISCORD = TONE_RMS(A_DISCORD), R_EXTRA = TONE_RMS(A_EXTRA);
 
@@ -727,54 +721,15 @@ int main(int argc, char **argv)
 	obs_source_set_audio_mixers(game, 1);
 	os_sleep_ms(500);
 
-	// ── 6b: an OBS track as a fader input ───────────────────────────────────────────────
-	// Track 3 → Music brings everything ticked for Track 3: "extra" (on no fader) and "game",
-	// which is also on Game and so plays on both. Nothing is de-duplicated.
-	obs_source_set_audio_mixers(extra, 1 | 4);
-	obs_source_set_audio_mixers(game, 1 | 4);
-	assign_track(3, "Music");
-	window(800, 600);
-	double music_with_track = sqrt(R_MUSIC * R_MUSIC + R_EXTRA * R_EXTRA + R_GAME * R_GAME);
-	result(close_to(fader_rms("Music"), music_with_track, 0.03) && close_to(fader_rms("Game"), R_GAME, 0.03) && rest_dbfs() < -60.0 && mismatch()[0] == 0, "6b track → fader carries everything ticked for it",
-	       "Music %.4f (want %.4f: music + extra + game), Game %.4f (want %.4f: game is on both), rest %.1f dBFS, mismatch \"%s\"", fader_rms("Music"), music_with_track, fader_rms("Game"), R_GAME, rest_dbfs(), mismatch());
-	// Unticking the track in OBS is followed without any call to the plugin.
-	obs_source_set_audio_mixers(extra, 1);
-	obs_source_set_audio_mixers(game, 1);
-	window(800, 600);
-	result(close_to(fader_rms("Music"), R_MUSIC, 0.03) && close_to(rest_rms(), R_EXTRA, 0.03), "6c unticking the track takes the sources off", "Music %.4f (want %.4f), rest %.4f (want %.4f)", fader_rms("Music"), R_MUSIC,
-	       rest_rms(), R_EXTRA);
-	// Ticked for two tracks that are on faders: it plays on both.
-	obs_source_set_audio_mixers(extra, 1 | 2 | 4);
-	assign_track(2, "Voice");
-	window(800, 600);
-	double voice_with_extra = sqrt(R_VOICE * R_VOICE + R_EXTRA * R_EXTRA), music_with_extra = sqrt(R_MUSIC * R_MUSIC + R_EXTRA * R_EXTRA);
-	result(close_to(fader_rms("Voice"), voice_with_extra, 0.03) && close_to(fader_rms("Music"), music_with_extra, 0.03) && rest_dbfs() < -60.0 && mismatch()[0] == 0, "6d two tracks on faders: the source plays on both",
-	       "Voice %.4f (want %.4f), Music %.4f (want %.4f), rest %.1f dBFS, mismatch \"%s\"", fader_rms("Voice"), voice_with_extra, fader_rms("Music"), music_with_extra, rest_dbfs(), mismatch());
-	// A track sent to Everything else, then not used at all: the source is in the residual again.
-	assign_track(3, "none");
-	assign_track(2, "");
-	window(800, 600);
-	double rest_via_track = rest_rms();
-	assign_track(2, "none");
-	obs_source_set_audio_mixers(extra, 1);
-	window(800, 600);
-	result(close_to(rest_via_track, R_EXTRA, 0.03) && close_to(rest_rms(), R_EXTRA, 0.03) && close_to(fader_rms("Voice"), R_VOICE, 0.03) && close_to(fader_rms("Music"), R_MUSIC, 0.03),
-	       "6e track → Everything else, and tracks unused again", "rest via track %.4f, after %.4f (want %.4f); Voice %.4f Music %.4f", rest_via_track, rest_rms(), R_EXTRA, fader_rms("Voice"), fader_rms("Music"));
-
-	bool after_rest = test_panel_migration_rest(extra, "");
-	result(after_rest, "panel-migration-track-after-rest", "%s",
-	       after_rest ? "Track 3 is on Voice and extra is absent from Everything else" : "expected Track 3 on Voice with extra absent from Everything else");
-	bool after_deleted = test_panel_migration_rest(extra, "Deleted fader");
-	result(after_deleted, "panel-migration-track-after-deleted", "%s",
-	       after_deleted ? "Track 3 is on Voice and extra is absent from Everything else" : "expected Track 3 on Voice with extra absent from Everything else");
-
 	// ── 6f-6h: the settings dialog, one block per fader ─────────────────────────────────
-	// Each fader's name is the label of its first row; its sources and tracks are dropdowns under
-	// it, then an "Add…" dropdown. Nothing is called Auto.
+	// Each fader's name is the label of its first row; its sources are dropdowns under it, then an
+	// "Add a source…" dropdown. Nothing is called Auto and no OBS track is offered: "extra", never
+	// placed, is NEW in Everything else.
 	const char *rows = dialog();
 	bool laid_out = strstr(rows, "\tVoice\tvoice\t") && strstr(rows, "\tGame\tgame\t") && strstr(rows, "\tMusic\tmusic\t") && strstr(rows, "\tDiscord\tdiscord\t") &&
-			strstr(rows, "add:0\t \tAdd a source or track…\t") && strstr(rows, "OBS Track 2") && !strstr(rows, "OBS Track 1") && !strstr(rows, "Auto") && strstr(rows, "rest_info\tEverything else: extra");
-	result(laid_out, "6f dialog: a block per fader, sources as dropdowns", "%s", laid_out ? "Voice/Game/Music/Discord each list their source and an Add row; extra is under Everything else; no Auto" : rows);
+			strstr(rows, "add:0\t \tAdd a source…\t") && !strstr(rows, "OBS Track") && !strstr(rows, "Auto") && strstr(rows, "rest_info\tEverything else: extra (new)") &&
+			strstr(rows, "1 source isn't placed yet");
+	result(laid_out, "6f dialog: a block per fader, sources as dropdowns", "%s", laid_out ? "Voice/Game/Music/Discord each list their source and an Add row; extra is NEW under Everything else; no Auto, no tracks" : rows);
 	// Add a source to a fader, then take it off again, by picking in the dropdowns.
 	long redraws_before_add = dialog_redraws();
 	bool picked = dialog_pick("add:0", "extra");
@@ -789,8 +744,9 @@ int main(int argc, char **argv)
 	bool removed = dialog_pick(extra_key, "Remove from Voice");
 	bool redrawn_after_remove = redrawn_since(redraws_before_remove);
 	window(800, 600);
+	// Taken off, it is placed in Everything else: no longer NEW.
 	result(picked && row_shown && removed && close_to(voice_plus, sqrt(R_VOICE * R_VOICE + R_EXTRA * R_EXTRA), 0.03) && rest_added < -60.0 && close_to(fader_rms("Voice"), R_VOICE, 0.03) && close_to(rest_rms(), R_EXTRA, 0.03) &&
-		       strstr(dialog(), "Everything else: extra"),
+		       strstr(dialog(), "Everything else: extra.") && !strstr(dialog_rows, "new_info"),
 	       "6g dialog: add a source to a fader, then remove it", "added: Voice %.4f (want %.4f), rest %.1f dBFS, row %s; removed: Voice %.4f, rest %.4f (want %.4f)", voice_plus, sqrt(R_VOICE * R_VOICE + R_EXTRA * R_EXTRA), rest_added,
 	       extra_key, fader_rms("Voice"), rest_rms(), R_EXTRA);
 	// OBS applies a dropdown change by calling the plugin from inside the dropdown's own signal. A
@@ -798,49 +754,20 @@ int main(int argc, char **argv)
 	// "Remove from …"). The rebuild must come after, on the UI thread's next turn.
 	result(redraws_inside_update == 0 && redrawn_after_add && redrawn_after_remove, "6g2 dialog rebuilds after a change, never during it",
 	       "rebuilt during the change %ld time(s) (want 0); rebuilt afterwards: add %d, remove %d", redraws_inside_update, redrawn_after_add, redrawn_after_remove);
-	// A track goes on a fader the same way, and carries everything ticked for it: a source that
-	// was taken off a fader (extra) and one that has a fader of its own (game, now on both).
-	obs_source_set_audio_mixers(extra, 1 | 4);
-	obs_source_set_audio_mixers(game, 1 | 4);
-	bool track_picked = dialog_pick("add:2", "OBS Track 3");
-	window(800, 600);
-	double music_track = fader_rms("Music"), game_track = fader_rms("Game"), rest_track = rest_dbfs();
+	// The Add lists offer what isn't on a fader ("extra"), never a source that is on one.
 	dialog();
-	char track_key[32];
-	snprintf(track_key, sizeof(track_key), "%s", dialog_key_showing("OBS Track 3 (everything ticked for it)"));
-	// Nothing clever in the lists: "extra" is still offered as itself, a source that's on a fader
-	// (voice) is offered nowhere else, and a track on a fader leaves the other Add lists.
 	const char *add_game = strstr(dialog_rows, "add:1\t");
 	char game_choices[2048] = "";
 	if (add_game)
 		snprintf(game_choices, sizeof(game_choices), "%.*s", (int)strcspn(add_game, "\n"), add_game);
-	bool track_row = strncmp(track_key, "row:", 4) == 0 && strstr(game_choices, "|extra") && !strstr(game_choices, "now)") && !strstr(game_choices, "|voice") && !strstr(game_choices, "OBS Track 3") &&
-			 strstr(game_choices, "OBS Track 2");
-	// The dialog says which source is doubled and where: game (Game, and Music with Track 3). Not
-	// extra, which is only on Music. The warning goes when the track does.
-	const char *warn = strstr(dialog_rows, "dup_warning\t");
-	char warning[1024] = "";
-	if (warn)
-		snprintf(warning, sizeof(warning), "%.*s", (int)strcspn(warn, "\n"), warn);
-	bool warned = strstr(warning, "\"game\" is on 2 faders: Game, Music (with Track 3).") && !strstr(warning, "\"extra\"") && !strstr(warning, "\"voice\"");
-	bool track_removed = dialog_pick(track_key, "Remove from Music");
-	warned = warned && !strstr(dialog(), "dup_warning");
-	obs_source_set_audio_mixers(extra, 1);
-	obs_source_set_audio_mixers(game, 1);
-	window(800, 600);
-	result(track_picked && track_row && track_removed && warned && close_to(music_track, music_with_track, 0.03) && close_to(game_track, R_GAME, 0.03) && rest_track < -60.0 && close_to(fader_rms("Music"), R_MUSIC, 0.03) &&
-		       close_to(rest_rms(), R_EXTRA, 0.03),
-	       "6h dialog: a track on a fader warns of doubles", "warning %s; track on Music: Music %.4f (want %.4f), Game %.4f, rest %.1f dBFS, row %s; removed: Music %.4f, rest %.4f", warned ? "names game, Game and Music (with Track 3)" : "WRONG", music_track, music_with_track, game_track, rest_track, track_key,
-	       fader_rms("Music"), rest_rms());
-	if (!warned)
-		printf("      warning row was: %s\n", warning);
+	bool lists_ok = strstr(game_choices, "|extra") && !strstr(game_choices, "|voice") && !strstr(game_choices, "|game") && !strstr(game_choices, "OBS Track");
+	result(lists_ok, "6h dialog: Add lists offer only sources not on a fader", "Game's Add list: %s", game_choices);
 
 	// ── 6i: renaming a fader keeps what is on it; names are cut to the wire's 24 characters ──
-	// Sources and tracks are stored by fader name. Voice becomes Commentary in place: the voice
-	// tone and Track 4 (carrying "extra", which is on no fader of its own) follow it. A 30-character name is cut to 24 and still
-	// carries them. Then back to Voice for the cases below.
-	obs_source_set_audio_mixers(extra, 1 | 8);
-	assign_track(4, "Voice");
+	// Sources are stored by fader name. Voice becomes Commentary in place: the voice tone and
+	// "extra" (put on Voice for this) follow it. A 30-character name is cut to 24 and still carries
+	// them. Then back to Voice for the cases below.
+	assign("extra", "Voice");
 	const char *lists[] = {"Commentary,Game,Music,Discord", "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123,Game,Music,Discord", "Voice,Game,Music,Discord"};
 	const char *expect[] = {"Commentary", "ABCDEFGHIJKLMNOPQRSTUVWX", "Voice"};
 	double renamed_rms[3], renamed_rest[3];
@@ -856,13 +783,11 @@ int main(int argc, char **argv)
 		renamed_rms[i] = fader_rms(expect[i]);
 		renamed_rest[i] = rest_dbfs();
 	}
-	assign_track(4, "none");
-	obs_source_set_audio_mixers(extra, 1);
 	double voice_and_extra = sqrt(R_VOICE * R_VOICE + R_EXTRA * R_EXTRA);
 	bool followed = true;
 	for (int i = 0; i < 3; i++)
 		followed = followed && close_to(renamed_rms[i], voice_and_extra, 0.03) && renamed_rest[i] < -60.0;
-	result(followed, "6i renamed fader keeps its sources and tracks", "Commentary %.4f, 24-char name %.4f, Voice again %.4f (want %.4f each); rest %.1f %.1f %.1f dBFS", renamed_rms[0], renamed_rms[1], renamed_rms[2], voice_and_extra,
+	result(followed, "6i renamed fader keeps its sources", "Commentary %.4f, 24-char name %.4f, Voice again %.4f (want %.4f each); rest %.1f %.1f %.1f dBFS", renamed_rms[0], renamed_rms[1], renamed_rms[2], voice_and_extra,
 	       renamed_rest[0], renamed_rest[1], renamed_rest[2]);
 	window(600, 300);
 
@@ -1058,19 +983,26 @@ int main(int argc, char **argv)
 	obs_source_set_audio_mixers(twin_b, 1);
 	assign("twin-a", "Voice");
 	obs_sceneitem_t *twin_a_item = obs_scene_add(many, twin_a), *twin_b_item = obs_scene_add(many, twin_b);
-	// Three windows in a row (1.5 to 2 s) from the last time the source list was rebuilt, and
-	// adding two sources can rebuild it more than once: wait for the warning, not a fixed time.
-	for (int i = 0; i < 80; i++) {
+	// Three windows in a row (1.5 to 2 s) once both play. Rebuilding the source list meanwhile
+	// keeps the count (test/oracle-streak.c), but windows where the two copies reach the mix far
+	// enough apart take r under 0.5 and start it over: wait for the warning, not a fixed time.
+	// It normally comes within a few seconds, but on a busy CI agent (TeamCity #6508) the run of
+	// windows can take longer than the old 8 s, so poll against a wall-clock deadline well past
+	// that. The warning is sticky (withdrawn only after ORACLE_CALM quiet windows), so the checks
+	// below still see it once it is up.
+	uint64_t twin_t0 = os_gettime_ns(), twin_deadline = twin_t0 + 20000000000ULL;
+	double twin_warn_ms = -1;
+	do {
 		os_sleep_ms(100);
 		fetch_stats();
 		if (duplicate_is("twin-a"))
-			break;
-	}
+			twin_warn_ms = (double)(os_gettime_ns() - twin_t0) / 1e6;
+	} while (twin_warn_ms < 0 && os_gettime_ns() < twin_deadline);
 	window(300, 800);
 	double voice_twin = sqrt(R_VOICE * R_VOICE + TONE_RMS(0.2) * TONE_RMS(0.2));
 	result(duplicate_is("twin-a") && !source_dropped("twin-a") && mismatch()[0] == 0 && close_to(fader_rms("Voice"), voice_twin, 0.03) && close_to(rest_rms(), TONE_RMS(0.2), 0.05),
-	       "11 same audio from two sources: warned, not moved", "duplicate twin-a %d, dropped %d, mismatch \"%s\", Voice %.4f (want %.4f), rest %.4f (want %.4f: the other copy)", duplicate_is("twin-a"),
-	       source_dropped("twin-a"), mismatch(), fader_rms("Voice"), voice_twin, rest_rms(), TONE_RMS(0.2));
+	       "11 same audio from two sources: warned, not moved", "duplicate twin-a %d (warned after %.0f ms, want ≤ 20000), dropped %d, mismatch \"%s\", Voice %.4f (want %.4f), rest %.4f (want %.4f: the other copy)",
+	       duplicate_is("twin-a"), twin_warn_ms, source_dropped("twin-a"), mismatch(), fader_rms("Voice"), voice_twin, rest_rms(), TONE_RMS(0.2));
 	obs_sceneitem_remove(twin_b_item);
 	window(4500, 600);
 	result(duplicate_is("") && !source_dropped("twin-a") && close_to(fader_rms("Voice"), voice_twin, 0.03) && rest_dbfs() < -60.0, "11b warning withdrawn once the other copy is gone",
