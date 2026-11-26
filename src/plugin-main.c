@@ -75,11 +75,49 @@ static char *config_file(void)
 	return obs_module_config_path("settings.json");
 }
 
+// What the plugin itself remembers: the hub's last hello for this key (who it is, the plan, the
+// platforms, the faders and splitMaxFaders), the update notice, the first start. Kept out of the
+// source's settings: OBS's properties window compares those with a copy taken when it opened and
+// calls any difference "unsaved changes" (OBSBasicProperties::CheckSettings), and Discard or Cancel
+// puts the copy back. So the hub saying hello while Tools → Faders is open is no edit. Saved in the
+// same settings.json.
+static obs_data_t *plugin_state;
+static const char *const STATE_KEYS[] = {"account", "account_key", "account_plan", "account_platforms", "account_faders", "account_split_max_faders",
+					 "update_available", "update_announced", S_FIRST_START, NULL};
+
+// Move any of those found in `settings` (a settings.json from before, a script) into plugin_state.
+static bool adopt_state(obs_data_t *settings)
+{
+	bool any = false;
+	for (const char *const *k = STATE_KEYS; settings && *k; k++) {
+		if (!obs_data_has_user_value(settings, *k))
+			continue;
+		obs_data_item_t *item = obs_data_item_byname(settings, *k);
+		enum obs_data_type type = obs_data_item_gettype(item);
+		if (type == OBS_DATA_STRING)
+			obs_data_set_string(plugin_state, *k, obs_data_item_get_string(item));
+		else if (type == OBS_DATA_NUMBER)
+			obs_data_set_int(plugin_state, *k, obs_data_item_get_int(item));
+		else if (type == OBS_DATA_BOOLEAN)
+			obs_data_set_bool(plugin_state, *k, obs_data_item_get_bool(item));
+		obs_data_item_release(&item);
+		obs_data_erase(settings, *k);
+		any = true;
+	}
+	return any;
+}
+
+// settings.json: the settings the window edits plus what the plugin remembers.
 static void save_settings(obs_data_t *settings)
 {
+	obs_data_t *all = obs_data_create();
+	if (settings)
+		obs_data_apply(all, settings);
+	obs_data_apply(all, plugin_state);
 	char *path = config_file();
-	obs_data_save_json_safe(settings, path, "tmp", "bak");
+	obs_data_save_json_safe(all, path, "tmp", "bak");
 	bfree(path);
+	obs_data_release(all);
 }
 
 static void update_available(const char *version);
@@ -290,8 +328,8 @@ static void remember_update(void *param)
 	char *version = param;
 	if (settings_source) {
 		obs_data_t *settings = obs_source_get_settings(settings_source);
-		if (strcmp(obs_data_get_string(settings, "update_available"), version) != 0) {
-			obs_data_set_string(settings, "update_available", version);
+		if (strcmp(obs_data_get_string(plugin_state, "update_available"), version) != 0) {
+			obs_data_set_string(plugin_state, "update_available", version);
 			save_settings(settings);
 		}
 		obs_data_release(settings);
@@ -308,7 +346,7 @@ static void update_available(const char *version)
 // The saved release, or NULL once this build is that version or newer (the user has updated).
 static const char *pending_update(obs_data_t *settings)
 {
-	const char *latest = settings ? obs_data_get_string(settings, "update_available") : "";
+	const char *latest = settings ? obs_data_get_string(plugin_state, "update_available") : "";
 	int a[3], b[3];
 	if (sscanf(latest, "%d.%d.%d", &a[0], &a[1], &a[2]) != 3 || sscanf(FDR_VERSION_STR, "%d.%d.%d", &b[0], &b[1], &b[2]) != 3)
 		return NULL;
@@ -500,8 +538,8 @@ static void describe_status(obs_data_t *s, const fdr_uplink_status *st, struct s
 {
 	memset(v, 0, sizeof(*v));
 	v->live = streaming;
-	const char *account = obs_data_get_string(s, "account");
-	bool remembered = *account && strcmp(obs_data_get_string(s, "account_key"), key_tail(obs_data_get_string(s, "key"))) == 0;
+	const char *account = obs_data_get_string(plugin_state, "account");
+	bool remembered = *account && strcmp(obs_data_get_string(plugin_state, "account_key"), key_tail(obs_data_get_string(s, "key"))) == 0;
 	if (mixer_unavailable) {
 		v->tone = TONE_ERROR;
 		dstr_copy(&v->title, "Faders can't run");
@@ -784,16 +822,16 @@ static void refresh_window(void *unused)
 	obs_data_t *s = obs_source_get_settings(settings_source);
 	const char *tail = key_tail(obs_data_get_string(s, "key"));
 	if (st.connected && st.channel[0] &&
-	    (strcmp(obs_data_get_string(s, "account"), st.channel) != 0 || strcmp(obs_data_get_string(s, "account_key"), tail) != 0 ||
-	     (st.max_stems > 0 && obs_data_get_int(s, "account_faders") != st.max_stems) || strcmp(obs_data_get_string(s, "account_plan"), st.plan) != 0 ||
-	     strcmp(obs_data_get_string(s, "account_platforms"), st.platforms) != 0 || obs_data_get_int(s, "account_split_max_faders") != st.split_max_faders)) {
-		obs_data_set_string(s, "account", st.channel);
-		obs_data_set_string(s, "account_key", tail);
-		obs_data_set_string(s, "account_plan", st.plan);
-		obs_data_set_string(s, "account_platforms", st.platforms);
-		obs_data_set_int(s, "account_split_max_faders", st.split_max_faders);
+	    (strcmp(obs_data_get_string(plugin_state, "account"), st.channel) != 0 || strcmp(obs_data_get_string(plugin_state, "account_key"), tail) != 0 ||
+	     (st.max_stems > 0 && obs_data_get_int(plugin_state, "account_faders") != st.max_stems) || strcmp(obs_data_get_string(plugin_state, "account_plan"), st.plan) != 0 ||
+	     strcmp(obs_data_get_string(plugin_state, "account_platforms"), st.platforms) != 0 || obs_data_get_int(plugin_state, "account_split_max_faders") != st.split_max_faders)) {
+		obs_data_set_string(plugin_state, "account", st.channel);
+		obs_data_set_string(plugin_state, "account_key", tail);
+		obs_data_set_string(plugin_state, "account_plan", st.plan);
+		obs_data_set_string(plugin_state, "account_platforms", st.platforms);
+		obs_data_set_int(plugin_state, "account_split_max_faders", st.split_max_faders);
 		if (st.max_stems > 0)
-			obs_data_set_int(s, "account_faders", st.max_stems);
+			obs_data_set_int(plugin_state, "account_faders", st.max_stems);
 		save_settings(s);
 	}
 	obs_data_release(s);
@@ -934,9 +972,9 @@ static int known_allowance(obs_data_t *settings, const fdr_uplink_status *st, co
 {
 	int allowance = st->max_stems > 0 ? st->max_stems : 0;
 	const char *p = plan_label(st->plan);
-	if (!allowance && !strcmp(obs_data_get_string(settings, "account_key"), key_tail(obs_data_get_string(settings, "key")))) {
-		allowance = (int)obs_data_get_int(settings, "account_faders");
-		p = plan_label(obs_data_get_string(settings, "account_plan"));
+	if (!allowance && !strcmp(obs_data_get_string(plugin_state, "account_key"), key_tail(obs_data_get_string(settings, "key")))) {
+		allowance = (int)obs_data_get_int(plugin_state, "account_faders");
+		p = plan_label(obs_data_get_string(plugin_state, "account_plan"));
 	}
 	if (plan)
 		*plan = p;
@@ -993,12 +1031,12 @@ struct account_view {
 static void known_account(obs_data_t *settings, const fdr_uplink_status *st, struct account_view *v)
 {
 	bool live = st->plan[0] != 0;
-	bool remembered = !strcmp(obs_data_get_string(settings, "account_key"), key_tail(obs_data_get_string(settings, "key")));
-	const char *plan = live ? st->plan : remembered ? obs_data_get_string(settings, "account_plan") : "";
-	const char *platforms = live ? st->platforms : remembered ? obs_data_get_string(settings, "account_platforms") : "";
+	bool remembered = !strcmp(obs_data_get_string(plugin_state, "account_key"), key_tail(obs_data_get_string(settings, "key")));
+	const char *plan = live ? st->plan : remembered ? obs_data_get_string(plugin_state, "account_plan") : "";
+	const char *platforms = live ? st->platforms : remembered ? obs_data_get_string(plugin_state, "account_platforms") : "";
 	snprintf(v->plan, sizeof(v->plan), "%s", plan);
 	v->a = (struct fdr_account){v->plan, strstr(platforms, "twitch") != NULL, strstr(platforms, "youtube") != NULL};
-	v->split_max_faders = live ? st->split_max_faders : remembered ? (int)obs_data_get_int(settings, "account_split_max_faders") : 0;
+	v->split_max_faders = live ? st->split_max_faders : remembered ? (int)obs_data_get_int(plugin_state, "account_split_max_faders") : 0;
 }
 
 static enum fdr_platform platform_of(obs_source_t *s)
@@ -1840,6 +1878,7 @@ static void follow_renames(obs_data_t *settings, const char names[][FDR_STEM_NAM
 static void src_update(void *data, obs_data_t *settings)
 {
 	UNUSED_PARAMETER(data);
+	adopt_state(settings);
 	erase_legacy_tracks(settings);
 	bool reassigned = apply_dialog_changes(settings);
 	// Renaming, adding or removing a fader changes the rows too.
@@ -1901,8 +1940,8 @@ static void open_settings(void *unused)
 static bool announce_update(obs_data_t *settings)
 {
 	const char *update = pending_update(settings);
-	if (update && strcmp(obs_data_get_string(settings, "update_announced"), update) != 0) {
-		obs_data_set_string(settings, "update_announced", update);
+	if (update && strcmp(obs_data_get_string(plugin_state, "update_announced"), update) != 0) {
+		obs_data_set_string(plugin_state, "update_announced", update);
 		return true;
 	}
 	return false;
@@ -1923,9 +1962,9 @@ static bool placed_anywhere(void *param, obs_source_t *s)
 // (an earlier install), and never again.
 static bool open_on_first_start(obs_data_t *settings)
 {
-	if (obs_data_get_bool(settings, S_FIRST_START))
+	if (obs_data_get_bool(plugin_state, S_FIRST_START))
 		return false;
-	obs_data_set_bool(settings, S_FIRST_START, true);
+	obs_data_set_bool(plugin_state, S_FIRST_START, true);
 	bool placed = false;
 	obs_enum_sources(placed_anywhere, &placed);
 	return !placed;
@@ -1938,7 +1977,7 @@ static void on_finished_loading(void)
 	obs_data_t *settings = obs_source_get_settings(settings_source);
 	bool first = open_on_first_start(settings);
 	bool update = announce_update(settings);
-	if (first || update || !obs_data_has_user_value(settings, S_FIRST_START))
+	if (first || update || !obs_data_has_user_value(plugin_state, S_FIRST_START))
 		save_settings(settings);
 	if (first || update)
 		obs_queue_task(OBS_TASK_UI, open_settings, NULL, false);
@@ -2376,9 +2415,9 @@ static bool debug_report(bool names, char **report, const char **error)
 	char home[512];
 	const char *key = obs_data_get_string(settings, "key");
 	const char *server = obs_data_get_string(settings, "server");
-	const char *account = obs_data_get_string(settings, "account");
-	bool remembered = *account && strcmp(obs_data_get_string(settings, "account_key"), key_tail(key)) == 0;
-	const char *plan = st.plan[0] ? st.plan : remembered ? obs_data_get_string(settings, "account_plan") : "";
+	const char *account = obs_data_get_string(plugin_state, "account");
+	bool remembered = *account && strcmp(obs_data_get_string(plugin_state, "account_key"), key_tail(key)) == 0;
+	const char *plan = st.plan[0] ? st.plan : remembered ? obs_data_get_string(plugin_state, "account_plan") : "";
 	const char *allow_plan = NULL;
 	time_t now = time(NULL);
 	uint64_t now_ns = os_gettime_ns();
@@ -2483,6 +2522,8 @@ bool obs_module_load(void)
 	char *path = config_file();
 	obs_data_t *saved = obs_data_create_from_json_file_safe(path, "bak");
 	bfree(path);
+	plugin_state = obs_data_create();
+	adopt_state(saved); // the source gets only what the window edits
 	char *dir = obs_module_config_path("");
 	os_mkdirs(dir);
 	bfree(dir);
@@ -2528,4 +2569,6 @@ void obs_module_unload(void)
 	apply(NULL);
 	obs_source_release(settings_source);
 	settings_source = NULL;
+	obs_data_release(plugin_state);
+	plugin_state = NULL;
 }
