@@ -10,6 +10,7 @@
  */
 #include "uplink.h"
 #include "ws.h"
+#include "logring.h"
 
 #include <obs-module.h>
 #include <util/platform.h>
@@ -207,9 +208,9 @@ static void send_status(struct fdr_uplink *u, uint64_t now)
 		u->status.stream_track_silent = silent;
 		u->stream_status_dirty = true;
 		if (silent)
-			blog(LOG_WARNING, "[faders] Track %d, which OBS streams, is silent while the Faders layers have sound: viewers hear nothing and the extension can't sync. Tick Track %d for your sources in Edit → Advanced Audio Properties.", u->status.stream_track, u->status.stream_track);
+			fdr_log(LOG_WARNING, "Track %d, which OBS streams, is silent while the Faders layers have sound: viewers hear nothing and the extension can't sync. Tick Track %d for your sources in Edit → Advanced Audio Properties.", u->status.stream_track, u->status.stream_track);
 		else
-			blog(LOG_INFO, "[faders] Track %d is no longer flagged as silent", u->status.stream_track);
+			fdr_log(LOG_INFO, "Track %d is no longer flagged as silent", u->status.stream_track);
 	}
 	bool send = u->stream_status_dirty && u->ws && u->connected && u->watching_stream;
 	if (send)
@@ -321,7 +322,7 @@ static void on_open(void *param)
 	u->stream_status_dirty = true; // a (re)connected hub hasn't heard it
 	u->stems_dirty = true;
 	pthread_mutex_unlock(&u->mu);
-	blog(LOG_INFO, "[faders] connected to %s", u->server);
+	fdr_log(LOG_INFO, "connected to %s", u->server);
 }
 
 static void on_text(void *param, const char *text)
@@ -343,7 +344,7 @@ static void on_text(void *param, const char *text)
 		const char *latest = obs_data_get_string(message, "latest");
 		size_t n = strspn(latest, "0123456789.");
 		if (n > 0 && n == strlen(latest) && n < 24) {
-			blog(LOG_INFO, "[faders] update available: %s (this is %s)", latest, FDR_VERSION_STR);
+			fdr_log(LOG_INFO, "update available: %s (this is %s)", latest, FDR_VERSION_STR);
 			if (u->update_available)
 				u->update_available(latest);
 		}
@@ -373,7 +374,7 @@ static void on_text(void *param, const char *text)
 			int listeners = (int)n;
 			pthread_mutex_lock(&u->mu);
 			if ((u->listeners == 0) != (listeners == 0))
-				blog(LOG_INFO, "[faders] %d listener(s): %s uplink", listeners, listeners ? "resuming" : "pausing");
+				fdr_log(LOG_INFO, "%d listener(s): %s uplink", listeners, listeners ? "resuming" : "pausing");
 			if (u->listeners == 0 && listeners > 0) {
 				// While we were paused the hub may have hibernated and lost its 60 s ring. Offer
 				// the whole backlog again, as on connect (the hub drops chunks it still holds), or
@@ -399,7 +400,7 @@ static void on_close(void *param, int http_status, const char *reason)
 	snprintf(u->status.failure, sizeof(u->status.failure), "%s", reason);
 	u->status.rejected_status = http_status;
 	pthread_mutex_unlock(&u->mu);
-	blog(LOG_WARNING, "[faders] disconnected: %s", reason);
+	fdr_log(LOG_WARNING, "disconnected: %s", reason);
 }
 
 // Worker thread only. Sends backlog chunks the hub hasn't seen, if anyone is listening.
@@ -445,7 +446,7 @@ static void maintain_connection(struct fdr_uplink *u, uint64_t now)
 		set_error(u, "no response from the server");
 		snprintf(u->status.failure, sizeof(u->status.failure), "no response from the server");
 		u->status.rejected_status = 0;
-		blog(LOG_WARNING, "[faders] no response from the server; reconnecting");
+		fdr_log(LOG_WARNING, "no response from the server; reconnecting");
 		open = ping_due = false;
 	}
 	if (ping_due)
@@ -537,7 +538,7 @@ static void encode_ready(struct fdr_uplink *u)
 		for (int s = 0; s < MAX_STEMS; s++)
 			if (u->enc[s])
 				opus_encoder_ctl(u->enc[s], OPUS_SET_BITRATE(want));
-		blog(LOG_INFO, "[faders] audio quality: %d kbps per layer", want / 1000);
+		fdr_log(LOG_INFO, "audio quality: %d kbps per layer", want / 1000);
 		u->bitrate = want;
 	}
 	for (;;) {
@@ -626,7 +627,7 @@ fdr_uplink_t *fdr_uplink_start(const fdr_uplink_config *cfg)
 	u->n_stems = 0;            // stems arrive with fdr_uplink_set_stems; nothing is encoded before that
 	u->status.running = true;
 	pthread_create(&u->thread, NULL, worker, u);
-	blog(LOG_INFO, "[faders] uplink started → %s", u->server);
+	fdr_log(LOG_INFO, "uplink started → %s", u->server);
 	return u;
 }
 
@@ -670,7 +671,7 @@ void fdr_uplink_set_stems(fdr_uplink_t *u, const char *const *names, int n, bool
 	}
 	pthread_mutex_unlock(&u->mu);
 	if (changed)
-		blog(LOG_INFO, "[faders] stems: %d layer(s)%s", n, rest ? " incl. Everything else" : "");
+		fdr_log(LOG_INFO, "stems: %d layer(s)%s", n, rest ? " incl. Everything else" : "");
 }
 
 void fdr_uplink_set_mismatch(fdr_uplink_t *u, const char *source_name)
@@ -725,7 +726,7 @@ void fdr_uplink_stop(fdr_uplink_t *u)
 	bfree(u->server);
 	bfree(u->key);
 	bfree(u);
-	blog(LOG_INFO, "[faders] uplink stopped");
+	fdr_log(LOG_INFO, "uplink stopped");
 }
 
 void fdr_uplink_get_status(fdr_uplink_t *u, fdr_uplink_status *out)
@@ -766,5 +767,5 @@ void fdr_uplink_watch_stream_track(fdr_uplink_t *u, int track)
 	u->status.stream_track = track;
 	u->stream_status_dirty = true;
 	pthread_mutex_unlock(&u->mu);
-	blog(LOG_INFO, "[faders] streamed track is Track %d: silence check on, Everything else measured against it", track);
+	fdr_log(LOG_INFO, "streamed track is Track %d: silence check on, Everything else measured against it", track);
 }

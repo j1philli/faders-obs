@@ -45,6 +45,8 @@ static bool listed(const char *name)
 	snprintf(want, sizeof(want), "%s,", name); // names in the line end in ", " or "."
 	char want_end[256];
 	snprintf(want_end, sizeof(want_end), "%s.", name);
+	char want_new[256]; // a source never placed is NEW: "name (new)"
+	snprintf(want_new, sizeof(want_new), "%s (new)", name);
 	const char *p = strstr(panel_rows, "rest_info\t");
 	const char *e = p ? strchr(p, '\n') : NULL;
 	bool rest = false;
@@ -53,7 +55,7 @@ static bool listed(const char *name)
 		char *line = malloc(n + 1);
 		memcpy(line, p, n);
 		line[n] = 0;
-		rest = strstr(line, want) || strstr(line, want_end);
+		rest = strstr(line, want) || strstr(line, want_end) || strstr(line, want_new);
 		free(line);
 	}
 	return rest || in_block("Voice", name) || in_block("Game", name) || in_block("Music", name);
@@ -140,8 +142,8 @@ int main(void)
 	obs_register_source(&window_info);
 	obs_register_source(&media_info);
 
-	// His panel as described. Placements are what put each source where his screenshot shows it;
-	// the rest are where the plugin's starting guess (by kind) puts them.
+	// His panel as described. On 0.4.0 the rule table put most of these where his screenshot shows
+	// them; nothing is placed by kind any more, so the fixture places each one where it is shown.
 	obs_source_t *his[32];
 	int n = 0;
 	his[n++] = cable("Lav Mic", "{0.0.1.00000000}.{b9a1c0de-0000-4000-8000-000000000001}");      // Voice (kind)
@@ -159,8 +161,17 @@ int main(void)
 	his[n++] = make("wasapi_process_output_capture", "9. Spotify");       // Music (kind + name)
 	obs_source_t *aoc = his[n++] = make("wasapi_output_capture", "Audio Output Capture");
 	place(aoc, "Music");
+	for (int i = 0; i < n; i++) {
+		const char *nm = obs_source_get_name(his[i]);
+		bool voice = !strcmp(nm, "Lav Mic") || !strcmp(nm, "1.2 Traveler");
+		bool music = !strcmp(nm, "Music-Lofi") || !strcmp(nm, "9. Spotify");
+		if (his[i] != aoc)
+			place(his[i], voice ? "Voice" : music ? "Music" : "Game");
+	}
 	his[n++] = make("ffmpeg_source", "StartingSoon-Music");
 	his[n++] = make("ffmpeg_source", "StartingSoon-Music2");
+	place(his[n - 2], "Music");
+	place(his[n - 1], "Music");
 	obs_source_t *b = his[n++] = cable("4. B - Virtual Cable (Track 1 Only)", "{0.0.1.00000000}.{b9a1c0de-0000-4000-8000-00000000000b}");
 	obs_source_t *a = his[n++] = cable("5. A - Virtual Cable (All Tracks)", "{0.0.1.00000000}.{b9a1c0de-0000-4000-8000-00000000000a}");
 	obs_source_t *vc1 = his[n++] = cable("Virtual Cable 1 (Track 1 Only)", "{0.0.1.00000000}.{b9a1c0de-0000-4000-8000-000000000010}");
@@ -231,15 +242,13 @@ int main(void)
 	dialog();
 	result(audio_inputs() == 129 && listed(CABLE_C), "sharkey2: 129 inputs, 6. C made early: listed", "%d inputs; found under: %s", audio_inputs(), where(CABLE_C));
 
-	// A track on a fader: 6. C is on Everything else and ticked for Track 3, and Track 3 is on
-	// Music, so Music plays it. As the 128th input, Music must still show how it gets there.
+	// Ticked for Track 3: OBS tracks don't decide faders any more, so 6. C stays in Everything else
+	// and is listed there as the 128th input, with no OBS Track row anywhere.
 	c = newest_c_at(c, 128, "");
 	obs_source_set_audio_mixers(c, (1 << 0) | (1 << 2));
-	set_track(3, "Music");
 	dialog();
-	result(audio_inputs() == 128 && (listed(CABLE_C) || in_block("Music", "OBS Track 3 (everything ticked for it)")), "sharkey2: 6. C is input 128, via Track 3 on Music: shown",
+	result(audio_inputs() == 128 && listed(CABLE_C) && !in_block("Music", CABLE_C) && !strstr(panel_rows, "OBS Track"), "sharkey2: 6. C is input 128, ticked for Track 3: in Everything else",
 	       "found under: %s; Music [%.200s]", where(CABLE_C), block("Music"));
-	set_track(3, "none");
 
 	for (int i = 0; i < n_fillers; i++)
 		obs_source_release(fillers[i]);

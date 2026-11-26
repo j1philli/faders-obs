@@ -139,8 +139,10 @@ events; the audio thread takes a strong reference per source per tick):
    their audio is the transition's own and lands in Everything else. A source on both sides, or
    appearing twice in the tree, gets gain 1 (libobs mixes it once). `faders-mixtest` case 7
    holds < −40 dBFS during a 300 ms fade in 16/16 runs (−76 to −109).
-3. Sum into its fader (`faders_fader` private setting by name; absent = the rule table;
-   "" = Everything else; faders past the plan's `maxStems` fold into Everything else).
+3. Sum into its fader (`faders_fader` private setting by name; absent = Everything else
+   (NEW, never placed); "" = Everything else; a name that is no longer a fader = Everything
+   else; faders past the plan's `maxStems` fold into Everything else). Nothing is placed by
+   kind of source or by OBS track.
 4. Everything else = unclamped track − Σ faders. Σ(all stems) == the streamed track exactly.
 5. Oracle: per ~0.5 s window, the residual correlated with each included source's
    contribution; |r| > 0.5 three windows in a row. r < 0: the source isn't in the stream the
@@ -157,13 +159,6 @@ aligned; a duplicated source counted once; two dozen sources p50 42–52 µs, p9
 plan cap folds faders (hub `maxStems` 2 → 2 + Everything else on the wire); an injected
 mismatch dropped after 1.3 s; a 2.5 s Fade to Color to a silent scene and back drops nothing; the same audio from a second source warned about and left on its fader.
 
-Rule table for automatic assignment (first match; a fader that isn't configured falls back as
-noted): mic inputs (`wasapi_input_capture`, `coreaudio_input_capture`, `pulse_input_capture`,
-`alsa_input_capture`) → Voice; app audio capture (`wasapi_process_output_capture`,
-`sck_audio_capture`, pipewire app capture) whose name/app/window mentions discord, teamspeak,
-slack, zoom, skype or mumble → Discord (else Voice); app capture or media sources
-(`ffmpeg_source`, `vlc_source`, `slideshow`) mentioning spotify, apple music, tidal, foobar,
-deezer, youtube music, "music" or "playlist" → Music; `browser_source` or anything mentioning
-alert, streamelements, streamlabs or sound alert → Alerts (else Everything else); other app
-capture, media, desktop audio (`wasapi_output_capture`, `coreaudio_output_capture`,
-`pulse_output_capture`), game/window/display capture → Game; everything else → Everything else.
+Placement (`src/placement.c`): sources start in Everything else, marked NEW, until placed.
+There are no rules and no track mapping. A move is checked against the faders as they are
+then: one to a fader that is gone or past the plan is refused and changes nothing.
