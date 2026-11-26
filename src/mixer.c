@@ -818,6 +818,42 @@ static void track_transition(struct fdr_mixer *m)
 	pthread_mutex_unlock(&m->tr_mu);
 }
 
+// Locked. The oracle's evidence so far (each source's sums for the window in progress, its run of
+// windows and its calm count) carries over to the new snapshot when the rebuild changed nothing it
+// measures: every source in the old snapshot is still there, routed the same way. Sources may have
+// been added (a source list is rebuilt more than once as sources come and go, and each rebuild
+// used to restart every three-window count). Anything else, a source gone, replaced or routed
+// elsewhere, starts every count over, as before: the evidence was about a residual that changed.
+static void carry_oracle(const struct snapshot *old, struct snapshot *snap)
+{
+	if (!old)
+		return;
+	int match[MAX_ENTRIES];
+	for (int i = 0; i < old->n; i++) {
+		const struct entry *o = &old->e[i];
+		obs_source_t *s = obs_weak_source_get_source(o->weak);
+		match[i] = -1;
+		// Sources keep their order when others are added, so look where it was first.
+		for (int j = 0; s && j < snap->n && match[i] < 0; j++) {
+			int k = (i + j) % snap->n;
+			const struct entry *e = &snap->e[k];
+			if (obs_weak_source_references_source(e->weak, s) && e->fader == o->fader && e->extra == o->extra && e->mixers == o->mixers && e->force == o->force &&
+			    e->dropped == o->dropped)
+				match[i] = k;
+		}
+		obs_source_release(s);
+		if (match[i] < 0)
+			return;
+	}
+	for (int i = 0; i < old->n; i++) {
+		struct entry *e = &snap->e[match[i]];
+		e->xy = old->e[i].xy;
+		e->xx = old->e[i].xx;
+		e->run = old->e[i].run;
+		e->calm = old->e[i].calm;
+	}
+}
+
 void fdr_mixer_rebuild(fdr_mixer_t *m)
 {
 	if (!m)
@@ -827,6 +863,7 @@ void fdr_mixer_rebuild(fdr_mixer_t *m)
 	struct collect c = {m, snap};
 	obs_enum_sources(collect_cb, &c);
 	struct snapshot *old = m->snap;
+	carry_oracle(old, snap);
 	m->snap = snap;
 	bool warn = snap->overflow && !m->overflow_warned;
 	m->overflow_warned = m->overflow_warned || snap->overflow;

@@ -835,19 +835,24 @@ int main(int argc, char **argv)
 	obs_source_set_audio_mixers(twin_b, 1);
 	assign("twin-a", "Voice");
 	obs_sceneitem_t *twin_a_item = obs_scene_add(many, twin_a), *twin_b_item = obs_scene_add(many, twin_b);
-	// Three windows in a row (1.5 to 2 s) from the last time the source list was rebuilt, and
-	// adding two sources can rebuild it more than once: wait for the warning, not a fixed time.
+	// Three windows in a row (1.5 to 2 s) once both play. Rebuilding the source list meanwhile
+	// keeps the count (test/oracle-streak.c), but windows where the two copies reach the mix far
+	// enough apart take r under 0.5 and start it over: wait for the warning, not a fixed time.
+	uint64_t twins_ns = os_gettime_ns();
+	double warn_ms = -1;
 	for (int i = 0; i < 80; i++) {
 		os_sleep_ms(100);
 		fetch_stats();
-		if (duplicate_is("twin-a"))
+		if (duplicate_is("twin-a")) {
+			warn_ms = (double)(os_gettime_ns() - twins_ns) / 1e6;
 			break;
+		}
 	}
 	window(300, 800);
 	double voice_twin = sqrt(R_VOICE * R_VOICE + TONE_RMS(0.2) * TONE_RMS(0.2));
 	result(duplicate_is("twin-a") && !source_dropped("twin-a") && mismatch()[0] == 0 && close_to(fader_rms("Voice"), voice_twin, 0.03) && close_to(rest_rms(), TONE_RMS(0.2), 0.05),
-	       "11 same audio from two sources: warned, not moved", "duplicate twin-a %d, dropped %d, mismatch \"%s\", Voice %.4f (want %.4f), rest %.4f (want %.4f: the other copy)", duplicate_is("twin-a"),
-	       source_dropped("twin-a"), mismatch(), fader_rms("Voice"), voice_twin, rest_rms(), TONE_RMS(0.2));
+	       "11 same audio from two sources: warned, not moved", "duplicate twin-a %d (warned after %.0f ms), dropped %d, mismatch \"%s\", Voice %.4f (want %.4f), rest %.4f (want %.4f: the other copy)",
+	       duplicate_is("twin-a"), warn_ms, source_dropped("twin-a"), mismatch(), fader_rms("Voice"), voice_twin, rest_rms(), TONE_RMS(0.2));
 	obs_sceneitem_remove(twin_b_item);
 	window(4500, 600);
 	result(duplicate_is("") && !source_dropped("twin-a") && close_to(fader_rms("Voice"), voice_twin, 0.03) && rest_dbfs() < -60.0, "11b warning withdrawn once the other copy is gone",
