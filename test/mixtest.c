@@ -762,17 +762,23 @@ int main(int argc, char **argv)
 	obs_sceneitem_t *twin_a_item = obs_scene_add(many, twin_a), *twin_b_item = obs_scene_add(many, twin_b);
 	// Three windows in a row (1.5 to 2 s) from the last time the source list was rebuilt, and
 	// adding two sources can rebuild it more than once: wait for the warning, not a fixed time.
-	for (int i = 0; i < 80; i++) {
+	// It normally comes within a few seconds, but on a busy CI agent (TeamCity #6508) the run of
+	// windows can take longer than the old 8 s, so poll against a wall-clock deadline well past
+	// that. The warning is sticky (withdrawn only after ORACLE_CALM quiet windows), so the checks
+	// below still see it once it is up.
+	uint64_t twin_t0 = os_gettime_ns(), twin_deadline = twin_t0 + 20000000000ULL;
+	double twin_warn_ms = -1;
+	do {
 		os_sleep_ms(100);
 		fetch_stats();
 		if (duplicate_is("twin-a"))
-			break;
-	}
+			twin_warn_ms = (double)(os_gettime_ns() - twin_t0) / 1e6;
+	} while (twin_warn_ms < 0 && os_gettime_ns() < twin_deadline);
 	window(300, 800);
 	double voice_twin = sqrt(R_VOICE * R_VOICE + TONE_RMS(0.2) * TONE_RMS(0.2));
 	result(duplicate_is("twin-a") && !source_dropped("twin-a") && mismatch()[0] == 0 && close_to(fader_rms("Voice"), voice_twin, 0.03) && close_to(rest_rms(), TONE_RMS(0.2), 0.05),
-	       "11 same audio from two sources: warned, not moved", "duplicate twin-a %d, dropped %d, mismatch \"%s\", Voice %.4f (want %.4f), rest %.4f (want %.4f: the other copy)", duplicate_is("twin-a"),
-	       source_dropped("twin-a"), mismatch(), fader_rms("Voice"), voice_twin, rest_rms(), TONE_RMS(0.2));
+	       "11 same audio from two sources: warned, not moved", "duplicate twin-a %d (warned after %.0f ms, want ≤ 20000), dropped %d, mismatch \"%s\", Voice %.4f (want %.4f), rest %.4f (want %.4f: the other copy)",
+	       duplicate_is("twin-a"), twin_warn_ms, source_dropped("twin-a"), mismatch(), fader_rms("Voice"), voice_twin, rest_rms(), TONE_RMS(0.2));
 	obs_sceneitem_remove(twin_b_item);
 	window(4500, 600);
 	result(duplicate_is("") && !source_dropped("twin-a") && close_to(fader_rms("Voice"), voice_twin, 0.03) && rest_dbfs() < -60.0, "11b warning withdrawn once the other copy is gone",
