@@ -14,7 +14,8 @@
 //
 //   window     the checkbox on every fader; once ticked: the two source lists, the YouTube track,
 //              "Counts as 1 fader.", the per-platform status lines; one fader only
-//   free       Free: every checkbox disabled, "Needs Pro or Partner"; a tick changes nothing
+//   free       Free: no checkbox, one line "Two sources per platform (one fader): Needs Pro or
+//              Partner"; a tick changes nothing
 //   noyoutube  no YouTube on the account: "Connect YouTube to use this"
 //   onlytwo    the split fader holds its Twitch and YouTube sources and nothing else
 //   roundtrip  save/load and duplicate keep it; the settings keep the fader and the track
@@ -22,6 +23,7 @@
 //   downgrade  Free turns it off and keeps the picks (YouTube source in Everything else);
 //              Pro again restores it
 //   counts     the split fader counts as one fader against the plan's allowance
+//   report     the debug report says what the split is doing, names on and off, and why it's off
 // One PASS/FAIL line per check; exits non-zero if any fails.
 #define main placement_main
 #include "placement.c"
@@ -240,14 +242,15 @@ static void scenario_free(void)
 	if (!start_as("split-free", "free", "twitch,youtube", 3, NULL))
 		return;
 	dialog();
-	result(checkbox_disabled(0, "Needs Pro or Partner") && checkbox_disabled(1, "Needs Pro or Partner") && checkbox_disabled(2, "Needs Pro or Partner"), "free 1 disabled: \"Needs Pro or Partner\"",
-	       "Voice \"%s\" | Music \"%s\"", checkbox(0), checkbox(2));
+	result(!*checkbox(0) && !*checkbox(1) && !*checkbox(2) && !strcmp(info("split_plan"), "Two sources per platform (one fader): Needs Pro or Partner"),
+	       "free 1 no checkbox per fader; one \"Needs Pro or Partner\" line", "Voice \"%s\" | Game \"%s\" | Music \"%s\"; line \"%s\"", checkbox(0), checkbox(1), checkbox(2), info("split_plan"));
 	tick(2, true);
 	result(!*settings_string("split_fader") && !checkbox_on(2), "free 2 a tick on Free changes nothing", "saved \"%s\", feedback \"%s\"", settings_string("split_fader"), info("move_feedback"));
 	set_account("partner", "twitch,youtube");
 	dialog();
-	bool ok = !checkbox_disabled(2, NULL) && tick(2, true) && !strcmp(settings_string("split_fader"), "Music");
-	result(ok, "free 3 Partner may tick it", "Music \"%s\", saved \"%s\"", checkbox(2), settings_string("split_fader"));
+	bool boxes = *checkbox(0) && *checkbox(2) && !checkbox_disabled(2, NULL) && !*info("split_plan");
+	bool ok = boxes && tick(2, true) && !strcmp(settings_string("split_fader"), "Music");
+	result(ok, "free 3 Partner: a checkbox per fader again, and it ticks", "Music \"%s\", line \"%s\", saved \"%s\"", checkbox(2), info("split_plan"), settings_string("split_fader"));
 }
 
 static void scenario_noyoutube(void)
@@ -394,8 +397,9 @@ static void scenario_downgrade(void)
 		       settings_int("split_youtube_track") == 3,
 	       "downgrade 2 Free: off, Twitch source on the fader, YouTube source in Everything else, picks kept", "Spotify %s, YT Music %s, saved \"%s\" track %lld", where(spotify), where(ytm),
 	       settings_string("split_fader"), settings_int("split_youtube_track"));
-	result(checkbox_on(2) && strstr(info("split_info"), "Pro or Partner") != NULL && rest_has("YT Music"), "downgrade 3 the window says why and keeps the picks shown", "Music \"%s\"; \"%s\"; Everything else: %s",
-	       checkbox(2), info("split_info"), info("rest_info"));
+	result(checkbox_on(2) && strstr(info("split_info"), "Pro or Partner") != NULL && rest_has("YT Music") && !*checkbox(0) && !*checkbox(1) && !*info("split_plan"),
+	       "downgrade 3 the window says why and keeps the picks shown", "Music \"%s\"; Voice \"%s\"; line \"%s\"; \"%s\"; Everything else: %s", checkbox(2), checkbox(0), info("split_plan"),
+	       info("split_info"), info("rest_info"));
 	set_account("pro", "twitch");
 	dialog();
 	result(!strcmp(where(ytm), "Music||parked|youtube") && strstr(info("split_info"), "YouTube") != NULL, "downgrade 4 YouTube disconnected: off too", "YT Music %s; \"%s\"", where(ytm), info("split_info"));
@@ -430,6 +434,86 @@ static void scenario_counts(void)
 	drop(game);
 }
 
+
+// The plugin's debug report (faders_debug_report): its text, and whether its JSON parses.
+static char *report_text;
+static bool report_json_ok;
+static bool debug_report(bool names)
+{
+	calldata_t cd = {0};
+	calldata_set_bool(&cd, "names", names);
+	bool ok = call("faders_debug_report", &cd) && calldata_bool(&cd, "ok");
+	bfree(report_text);
+	report_text = bstrdup(calldata_string(&cd, "report") ? calldata_string(&cd, "report") : "");
+	calldata_free(&cd);
+	report_json_ok = false;
+	const char *a = strstr(report_text, "```json\n"), *b = a ? strstr(a + 8, "\n```") : NULL;
+	if (a && b) {
+		char *json = bstrdup_n(a + 8, (size_t)(b - a - 8));
+		obs_data_t *d = obs_data_create_from_json(json);
+		report_json_ok = d != NULL;
+		obs_data_release(d);
+		bfree(json);
+	}
+	return ok;
+}
+static bool in_report(const char *s)
+{
+	return report_text && strstr(report_text, s) != NULL;
+}
+// The report's one-line summary of the split ("" if it has none).
+static const char *split_line(void)
+{
+	static char out[1024];
+	out[0] = 0;
+	const char *p = report_text ? strstr(report_text, "- **Per-platform fader**") : NULL;
+	if (p)
+		snprintf(out, sizeof(out), "%.*s", (int)strcspn(p, "\n"), p);
+	return out;
+}
+
+static void scenario_report(void)
+{
+	if (!start_as("split-report", "pro", "twitch,youtube", 4, NULL))
+		return;
+	obs_source_t *spotify = make("wasapi_process_output_capture", "Spotify");
+	obs_source_t *ytm = make("browser_source", "YT Music"); // on Track 1 only: not on YouTube's Track 3
+	dialog();
+	bool none = debug_report(true) && strstr(split_line(), "none") && in_report("\"split\": {\"fader\": \"\", \"ticked\": false");
+	result(none && report_json_ok, "report 1 no split: says so", "line \"%s\", JSON %s", split_line(), report_json_ok ? "valid" : "INVALID");
+
+	setup_split(spotify, ytm, 3);
+	bool on = debug_report(true);
+	const char *line = split_line();
+	result(on && report_json_ok && strstr(line, "Music") && strstr(line, ", on") && strstr(line, "Twitch: Spotify") && strstr(line, "YouTube: YT Music") && strstr(line, "Track 3") &&
+		       strstr(line, "YouTube source isn't on Track 3") &&
+		       in_report("\"split\": {\"fader\": \"Music\", \"ticked\": true, \"on\": true, \"why\": \"on\", \"twitch_source\": \"Spotify\", \"youtube_source\": \"YT Music\", \"youtube_track\": 3") &&
+		       in_report("\"youtube-source-not-on-track\""),
+	       "report 2 on: fader, both sources, the track, the warnings", "line \"%s\", JSON %s", line, report_json_ok ? "valid" : "INVALID");
+
+	bool off_names = debug_report(false);
+	result(off_names && report_json_ok && !in_report("Spotify") && !in_report("YT Music") && !in_report("Music") && strstr(split_line(), "Fader 3") && in_report("\"twitch_source\": \"Source ") &&
+		       in_report("\"youtube_source\": \"Source "),
+	       "report 3 names off: the split's names are aliases too", "line \"%s\"; Spotify %d, YT Music %d, Music %d", split_line(), in_report("Spotify"), in_report("YT Music"), in_report("Music"));
+
+	set_account("free", "twitch,youtube");
+	dialog();
+	debug_report(true);
+	line = split_line();
+	result(report_json_ok && strstr(line, "off (needs Pro or Partner)") && in_report("\"on\": false, \"why\": \"plan\"") && in_report("YT Music (Music's YouTube source, until it's on)") &&
+		       in_report("\"state\": \"parked\""),
+	       "report 4 downgraded: off, why, and the YouTube source parked", "line \"%s\"", line);
+	set_account("pro", "twitch");
+	debug_report(true);
+	result(strstr(split_line(), "off (YouTube isn't connected)") && in_report("\"why\": \"no youtube\""), "report 5 YouTube not connected: off, and why", "line \"%s\"", split_line());
+	set_account("pro", "twitch,youtube");
+	place_value(ytm, "x:rest");
+	debug_report(true);
+	result(strstr(split_line(), "off (no YouTube source picked)") && in_report("\"youtube_source\": \"\""), "report 6 a missing source: off, and why", "line \"%s\"", split_line());
+	drop(spotify);
+	drop(ytm);
+}
+
 int main(int argc, char **argv)
 {
 	const char *which = argc > 1 ? argv[1] : "";
@@ -449,8 +533,10 @@ int main(int argc, char **argv)
 		scenario_downgrade();
 	else if (!strcmp(which, "counts"))
 		scenario_counts();
+	else if (!strcmp(which, "report"))
+		scenario_report();
 	else {
-		fprintf(stderr, "usage: %s window|free|noyoutube|onlytwo|roundtrip|reload|downgrade|counts\n", argv[0]);
+		fprintf(stderr, "usage: %s window|free|noyoutube|onlytwo|roundtrip|reload|downgrade|counts|report\n", argv[0]);
 		return 2;
 	}
 	if (!settings_source) {
