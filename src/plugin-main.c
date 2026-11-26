@@ -1083,6 +1083,20 @@ static void split_view_free(struct split_view *v)
 	obs_source_release(v->src.yt);
 	v->src.tw = v->src.yt = NULL;
 }
+// The split's warnings now (FDR_SPLIT_WARN_*): each source's tracks, and what the mixer measured
+// (YouTube's track silent, its source dropped). 0 until both sources and the track are picked.
+static unsigned split_warnings(const struct split_view *v)
+{
+	if (!v->src.tw || !v->src.yt || !v->track)
+		return 0;
+	unsigned w = fdr_split_track_warnings(obs_source_get_audio_mixers(v->src.tw), obs_source_get_audio_mixers(v->src.yt), v->stream_track, v->track);
+	fdr_uplink_status st;
+	get_status(&st);
+	if (st.split_track == v->track)
+		w |= st.split_warnings & (FDR_SPLIT_WARN_YOUTUBE_TRACK_SILENT | FDR_SPLIT_WARN_YOUTUBE_NOT_ON_TRACK);
+	return w;
+}
+
 // What a source does on the split fader (split.h): FDR_SPLIT_ROLE_NONE when it isn't on it.
 static enum fdr_split_role split_role_of(const struct split_view *v, obs_source_t *s)
 {
@@ -1226,10 +1240,13 @@ static void add_split_checkbox(obs_properties_t *group, struct dialog_model *m, 
 {
 	const struct split_view *v = m->split;
 	bool is_split = v->index == fader;
+	enum fdr_split_gate g = fdr_split_gate(&v->acc.a, &v->faders.list, v->fader, m->names[fader]);
+	// Free (or a plan not known yet): no checkbox here; one line for the whole window says so.
+	if (!is_split && g == FDR_SPLIT_GATE_PLAN)
+		return;
 	struct dialog_row *row = new_row(ROW_SPLIT, SPLIT_PREFIX, fader, m->names[fader], is_split ? "1" : "0");
 	if (!row)
 		return;
-	enum fdr_split_gate g = fdr_split_gate(&v->acc.a, &v->faders.list, v->fader, m->names[fader]);
 	char label[160];
 	if (is_split || g == FDR_SPLIT_GATE_OK)
 		snprintf(label, sizeof(label), "Two sources: one per platform");
@@ -1328,11 +1345,7 @@ static void add_split_block(obs_properties_t *group, struct dialog_model *m, int
 
 	// Each platform's source on its own track, and not on the other's.
 	if (v->src.tw && v->src.yt && v->track) {
-		unsigned w = fdr_split_track_warnings(obs_source_get_audio_mixers(v->src.tw), obs_source_get_audio_mixers(v->src.yt), v->stream_track, v->track);
-		fdr_uplink_status st;
-		get_status(&st);
-		if (st.split_track == v->track)
-			w |= st.split_warnings & (FDR_SPLIT_WARN_YOUTUBE_TRACK_SILENT | FDR_SPLIT_WARN_YOUTUBE_NOT_ON_TRACK);
+		unsigned w = split_warnings(v);
 		dstr_copy(&text, "");
 		if (w & FDR_SPLIT_WARN_TWITCH_NOT_ON_TRACK)
 			dstr_catf(&text, "%sTwitch source isn't on Track %d.", text.len ? "<br>" : "", v->stream_track);
@@ -1393,6 +1406,8 @@ static void add_assignment_rows(obs_properties_t *group, obs_data_t *settings, i
 		if (f < m.open)
 			add_split_checkbox(group, &m, f);
 	}
+	if (split.index < 0 && m.n > 0 && fdr_split_gate(&split.acc.a, &split.faders.list, split.fader, m.names[0]) == FDR_SPLIT_GATE_PLAN)
+		add_hint(group, "split_plan", "Two sources per platform (one fader): Needs Pro or Partner");
 	// What's left over, by name, so nothing is a mystery: NEW sources marked, and a source whose
 	// fader is gone says which one it was on (renaming a fader back brings it back).
 	struct dstr rest = {0};
@@ -2227,6 +2242,7 @@ struct report_sources {
 	int n, n_strings, total;
 	struct fader_set faders;
 	uint32_t stream_bit;
+	const struct split_view *split;
 };
 
 static const char *keep(struct report_sources *r, const char *s)
@@ -2253,13 +2269,21 @@ static bool collect_report_source(void *param, obs_source_t *s)
 	enum fdr_state state;
 	char name[FDR_STEM_NAME_MAX];
 	int idx = effective_placement(&r->faders, s, &saved, name, &state);
+	// On the split fader, its YouTube source while it's off and anything else saved on it play in
+	// Everything else (as faders_placement says).
+	const char *state_name = fdr_state_name(state);
+	enum fdr_split_role role = state == FDR_STATE_ON_FADER ? split_role_of(r->split, s) : FDR_SPLIT_ROLE_NONE;
+	if (role == FDR_SPLIT_ROLE_PARKED || role == FDR_SPLIT_ROLE_EXTRA) {
+		idx = -1;
+		state_name = fdr_split_role_name(role);
+	}
 	uint32_t mixers = obs_source_get_audio_mixers(s);
 	r->list[r->n++] = (struct fdr_report_source){
 		.name = keep(r, obs_source_get_name(s)),
 		.kind = keep(r, obs_source_get_id(s)),
 		.saved = keep(r, saved == FDR_SAVED_NEW ? "new" : saved == FDR_SAVED_REST ? "rest" : name),
 		.plays = keep(r, idx >= 0 ? r->faders.names[idx] : ""),
-		.state = fdr_state_name(state),
+		.state = state_name,
 		.muted = obs_source_muted(s),
 		.monitoring = monitoring_name(obs_source_get_monitoring_type(s)),
 		.tracks = mixers,
@@ -2310,7 +2334,15 @@ static bool debug_report(bool names, char **report, const char **error)
 	current_faders(settings, &r.faders);
 	int track = forced_stream_track ? forced_stream_track : frontend_loaded ? stream_audio_track() : 0;
 	r.stream_bit = 1u << ((track ? track : 1) - 1);
+	static struct split_view split; // as Tools → Faders shows it
+	split_view_get(settings, &split);
+	r.split = &split;
 	obs_enum_sources(collect_report_source, &r);
+	unsigned split_w = split.fader[0] ? split_warnings(&split) : 0;
+	char split_codes[256] = "";
+	for (int b = 0; b < FDR_SPLIT_WARN_COUNT; b++)
+		if (split_w & (1u << b))
+			snprintf(split_codes + strlen(split_codes), sizeof(split_codes) - strlen(split_codes), "%s%s", split_codes[0] ? "," : "", fdr_split_warning_code(1u << b));
 
 	struct fdr_report_fader faders[FDR_MAX_FADERS];
 	for (int i = 0; i < r.faders.list.n; i++)
@@ -2378,6 +2410,8 @@ static bool debug_report(bool names, char **report, const char **error)
 		.rejected_status = st.rejected_status,
 		.mix_mismatch = st.mix_mismatch,
 		.mix_duplicate = st.mix_duplicate,
+		.split = {split.fader, split.state.on, fdr_split_why_name(split.state.why), split.src.tw ? obs_source_get_name(split.src.tw) : "",
+			  split.src.yt ? obs_source_get_name(split.src.yt) : "", split.track, split_codes},
 		.faders = faders,
 		.n_faders = r.faders.list.n,
 		.allowance = known_allowance(settings, &st, &allow_plan),
@@ -2405,6 +2439,7 @@ static bool debug_report(bool names, char **report, const char **error)
 		bfree(stream_key);
 	}
 	bfree(config_dir);
+	split_view_free(&split);
 	for (int i = 0; i < r.n_strings; i++)
 		bfree(r.strings[i]);
 	obs_data_release(settings);
