@@ -152,8 +152,10 @@ add_dependencies(faders-mixtest faders)
 
 # The duplicate warning's three-window rule, tick by tick: src/mixer.c compiled into the test,
 # driven without an audio thread or a clock (test/oracle-streak.c).
-add_executable(faders-oracle-streak test/oracle-streak.c)
+# src/mixer.c places through src/placement.c and logs through src/logring.c.
+add_executable(faders-oracle-streak test/oracle-streak.c src/placement.c src/logring.c)
 target_include_directories(faders-oracle-streak PRIVATE ${OBS_INCLUDES} "${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(faders-oracle-streak PRIVATE Threads::Threads)
 target_compile_definitions(faders-oracle-streak PRIVATE FADERS_GRAPHICS_MODULE="${GRAPHICS_MODULE}")
 if(APPLE)
   target_link_options(faders-oracle-streak PRIVATE "-F${FRAMEWORKS}" "-Wl,-rpath,${FRAMEWORKS}")

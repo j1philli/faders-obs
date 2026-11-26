@@ -701,6 +701,8 @@ static void track_transition(struct fdr_mixer *m)
 // been added (a source list is rebuilt more than once as sources come and go, and each rebuild
 // used to restart every three-window count). Anything else, a source gone, replaced or routed
 // elsewhere, starts every count over, as before: the evidence was about a residual that changed.
+// "Routed" is the fader, force and dropped: a source plays on its one placed fader only (no extra
+// faders from OBS tracks), and whether it is on the streamed track is read live every tick.
 static void carry_oracle(const struct snapshot *old, struct snapshot *snap)
 {
 	if (!old)
@@ -714,8 +716,7 @@ static void carry_oracle(const struct snapshot *old, struct snapshot *snap)
 		for (int j = 0; s && j < snap->n && match[i] < 0; j++) {
 			int k = (i + j) % snap->n;
 			const struct entry *e = &snap->e[k];
-			if (obs_weak_source_references_source(e->weak, s) && e->fader == o->fader && e->extra == o->extra && e->mixers == o->mixers && e->force == o->force &&
-			    e->dropped == o->dropped)
+			if (obs_weak_source_references_source(e->weak, s) && e->fader == o->fader && e->force == o->force && e->dropped == o->dropped)
 				match[i] = k;
 		}
 		obs_source_release(s);
