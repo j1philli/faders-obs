@@ -33,6 +33,10 @@ void fdr_uplink_push_tick(fdr_uplink_t *u, uint64_t ts, const float *const *stem
 void fdr_uplink_set_mismatch(fdr_uplink_t *u, const char *source_name) {}
 void fdr_uplink_set_duplicate(fdr_uplink_t *u, const char *source_name) {}
 int fdr_uplink_max_stems(fdr_uplink_t *u) { return FDR_MAX_FADERS; }
+// The split fader's mixer (src/splitmix.c, compiled in) reports through these too; no split here.
+void fdr_uplink_get_status(fdr_uplink_t *u, fdr_uplink_status *out) { memset(out, 0, sizeof(*out)); }
+void fdr_uplink_set_layout(fdr_uplink_t *u, const struct fdr_stem_desc *stems, int n) {}
+void fdr_uplink_set_split_status(fdr_uplink_t *u, int youtube_track, unsigned warnings) {}
 
 // ── An audio input that outputs nothing itself: the test writes its mix buffer ───────────
 static const char *silent_name(void *u) { return "Test input"; }
