@@ -133,12 +133,24 @@ events; the audio thread takes a strong reference per source per tick):
    `transition_stop` can land between the transition's audio render and our callback. So for
    ticks past the fade end, until the old scene's sources are inactive, both candidates (old
    scene in full, new scene in full) are held back and the one closer to the transition
-   source's own `obs_source_get_audio_mix()` output that tick is used. A source's first active
-   tick goes to Everything else (a scene switched in by a transition is mixed at t ≈ 0 before
-   the `transition_start` handler runs). Fixed-length transitions (stingers) are not modelled:
+   source's own `obs_source_get_audio_mix()` output that tick is used. That includes the tick
+   on which they go inactive: the swap can land after libobs mixed the old scene in full and
+   before our callback, so an old-scene source that was active the tick before stays a
+   candidate for that one tick (otherwise the whole tick, ~1 fade in 40, went to Everything
+   else; `faders-mixtest` case 7a forces that ordering). A source's first active tick goes to
+   Everything else, except at the start of a modelled fade: libobs activates the incoming
+   scene just before `transition_start`, and its sources are rendered every tick, active or
+   not, so their buffers on their first active tick are that tick's. libobs may or may not
+   have mixed them into it (at B × t): that depends on where the start fell, and a scene that
+   has never been in the program is left out of its first tick. So their per-sample
+   contribution is held back and kept when the transition's output, less the rest of the
+   model, correlates with it (⟨r, c⟩ > |c|² / 2); same tick, no delay. Left to Everything
+   else, that tick put up to −44 dBFS of B there (`faders-mixtest … fade-start`, case 7c,
+   starts each fade just after a tick, with libobs's audio buffering off, where it is largest).
+   Fixed-length transitions (stingers) are not modelled:
    their audio is the transition's own and lands in Everything else. A source on both sides, or
    appearing twice in the tree, gets gain 1 (libobs mixes it once). `faders-mixtest` case 7
-   holds < −40 dBFS during a 300 ms fade in 16/16 runs (−76 to −109).
+   holds < −40 dBFS during a 300 ms fade.
 3. Sum into its fader (`faders_fader` private setting by name; absent = Everything else
    (NEW, never placed); "" = Everything else; a name that is no longer a fader = Everything
    else; faders past the plan's `maxStems` fold into Everything else). Nothing is placed by

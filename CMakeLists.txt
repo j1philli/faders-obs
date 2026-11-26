@@ -150,6 +150,25 @@ else()
 endif()
 add_dependencies(faders-mixtest faders)
 
+# The duplicate warning's three-window rule, tick by tick: src/mixer.c compiled into the test,
+# driven without an audio thread or a clock (test/oracle-streak.c).
+# src/mixer.c places through src/placement.c, parks a split fader's sources through src/split.c and
+# src/splitmix.c, and logs through src/logring.c.
+add_executable(faders-oracle-streak test/oracle-streak.c src/placement.c src/split.c src/splitmix.c src/logring.c)
+target_include_directories(faders-oracle-streak PRIVATE ${OBS_INCLUDES} "${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(faders-oracle-streak PRIVATE Threads::Threads)
+target_compile_definitions(faders-oracle-streak PRIVATE FADERS_GRAPHICS_MODULE="${GRAPHICS_MODULE}")
+if(APPLE)
+  target_link_options(faders-oracle-streak PRIVATE "-F${FRAMEWORKS}" "-Wl,-rpath,${FRAMEWORKS}")
+  target_link_libraries(faders-oracle-streak PRIVATE "-framework libobs")
+else()
+  target_link_libraries(faders-oracle-streak PRIVATE ${OBS_IMPORT_LIBS})
+  if(NOT MSVC)
+    target_link_options(faders-oracle-streak PRIVATE -static-libgcc -static)
+    target_compile_options(faders-oracle-streak PRIVATE ${MINGW_SHIM})
+  endif()
+endif()
+
 # Panel listing tests: "What's on each fader" when a fader has 2+ sources, one executable per
 # test/panel-listing-*.c (shared harness: test/panel-listing.h).
 file(GLOB PANEL_LISTING_TESTS CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/test/panel-listing-*.c")
@@ -173,6 +192,7 @@ endforeach()
 
 enable_testing()
 add_test(NAME panel-enumeration COMMAND faders-mixtest enumeration)
+add_test(NAME oracle-streak COMMAND faders-oracle-streak)
 foreach(scenario IN ITEMS legacy track-only map-and-track)
   add_test(NAME panel-migration-${scenario}
     COMMAND faders-mixtest --panel-migration "${CMAKE_CURRENT_BINARY_DIR}/panel-migration-${scenario}" "${scenario}")
