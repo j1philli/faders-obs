@@ -24,6 +24,7 @@
 //              Pro again restores it
 //   counts     the split fader counts as one fader against the plan's allowance
 //   report     the debug report says what the split is doing, names on and off, and why it's off
+//   quality    more faders than the hub's splitMaxFaders: off, picks kept, the window says why
 // One PASS/FAIL line per check; exits non-zero if any fails.
 #define main placement_main
 #include "placement.c"
@@ -514,6 +515,29 @@ static void scenario_report(void)
 	drop(ytm);
 }
 
+static void scenario_quality(void)
+{
+	// As remembered from the hub's quality message: a split is allowed with 2 faders at most.
+	if (!start_as("split-quality", "pro", "twitch,youtube", 4, ",\"account_split_max_faders\":2"))
+		return;
+	obs_source_t *spotify = make("wasapi_process_output_capture", "Spotify");
+	obs_source_t *ytm = make("browser_source", "YT Music");
+	obs_source_set_audio_mixers(ytm, 4);
+	setup_split(spotify, ytm, 3);
+	const char *why = "Too many faders for two sources at this audio quality (max 2 with a split).";
+	result(checkbox_on(2) && !strcmp(where(ytm), "Music||parked|youtube") && !strcmp(where(spotify), "Music|Music|ok|twitch") && strstr(info("split_info"), why) && !strcmp(tag(ytm), "youtube"),
+	       "quality 1 3 faders, max 2: off, picks kept, says why", "YT Music %s, Spotify %s; \"%s\"", where(ytm), where(spotify), info("split_info"));
+	debug_report(true);
+	result(strstr(split_line(), "off (too many faders for two sources at this audio quality: max 2 with a split)") && in_report("\"why\": \"quality\"") && in_report("\"split_max_faders\": 2"),
+	       "quality 2 the debug report says why", "line \"%s\"", split_line());
+	// Down to 2 faders: on.
+	configure("Voice,Music", true);
+	dialog();
+	result(!strcmp(where(ytm), "Music|Music|ok|youtube") && !strstr(info("split_info"), "Too many faders"), "quality 3 2 faders: on", "YT Music %s; \"%s\"", where(ytm), info("split_info"));
+	drop(spotify);
+	drop(ytm);
+}
+
 int main(int argc, char **argv)
 {
 	const char *which = argc > 1 ? argv[1] : "";
@@ -535,8 +559,10 @@ int main(int argc, char **argv)
 		scenario_counts();
 	else if (!strcmp(which, "report"))
 		scenario_report();
+	else if (!strcmp(which, "quality"))
+		scenario_quality();
 	else {
-		fprintf(stderr, "usage: %s window|free|noyoutube|onlytwo|roundtrip|reload|downgrade|counts|report\n", argv[0]);
+		fprintf(stderr, "usage: %s window|free|noyoutube|onlytwo|roundtrip|reload|downgrade|counts|report|quality\n", argv[0]);
 		return 2;
 	}
 	if (!settings_source) {

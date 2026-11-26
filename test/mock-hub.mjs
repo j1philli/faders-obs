@@ -13,12 +13,12 @@
 //                      plugin a new hello (a plan change or a platform linked mid-stream)
 // Every text message from the plugin is logged ("plugin <channel>: ..."), for tests to grep.
 //
-//   node test/mock-hub.mjs [--port 8787] [--token dev-token] [--kbps 256] [--max-stems 4] [--update 0.9.0] [--plan free] [--limit 25] [--youtube]
+//   node test/mock-hub.mjs [--port 8787] [--token dev-token] [--kbps 256] [--max-stems 4] [--update 0.9.0] [--plan free] [--limit 25] [--youtube] [--split-max-faders N]
 import { createServer } from "node:http";
 import { parseArgs } from "node:util";
 import { WebSocketServer } from "ws";
 
-const { values: args } = parseArgs({ options: { port: { type: "string", default: "8787" }, token: { type: "string", default: "dev-token" }, kbps: { type: "string" }, "max-stems": { type: "string" }, update: { type: "string" }, plan: { type: "string", default: "free" }, limit: { type: "string", default: "25" }, youtube: { type: "boolean", default: false } } });
+const { values: args } = parseArgs({ options: { port: { type: "string", default: "8787" }, token: { type: "string", default: "dev-token" }, kbps: { type: "string" }, "max-stems": { type: "string" }, update: { type: "string" }, plan: { type: "string", default: "free" }, limit: { type: "string", default: "25" }, youtube: { type: "boolean", default: false }, "split-max-faders": { type: "string" } } });
 const RING_MS = 60_000;
 const t0 = Date.now();
 const channels = new Map(); // name -> { ingest, listeners:Set, ring:[], lastSeq }
@@ -69,7 +69,7 @@ server.on("upgrade", (req, socket, head) => {
     if (role === "ingest") {
       c.ingest?.close(4000, "replaced by new ingest connection");
       c.ingest = ws;
-      if (args.kbps) ws.send(JSON.stringify({ type: "quality", kbps: Number(args.kbps), ...(args["max-stems"] ? { maxStems: Number(args["max-stems"]) } : {}) }));
+      if (args.kbps) ws.send(JSON.stringify({ type: "quality", kbps: Number(args.kbps), ...(args["max-stems"] ? { maxStems: Number(args["max-stems"]) } : {}), ...(args["split-max-faders"] ? { splitMaxFaders: Number(args["split-max-faders"]) } : {}) }));
       if (args.update) ws.send(JSON.stringify({ type: "update", latest: args.update }));
       // Who the key belongs to, as the real hub says it (Tools → Faders shows "Connected as …").
       ws.send(JSON.stringify({ type: "hello", channel: name, plan: args.plan, limit: Number(args.limit), twitch: true, youtube: args.youtube }));

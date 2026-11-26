@@ -17,6 +17,7 @@
 //   split    different music per platform, Everything else per platform, the oracle, warnings,
 //            downgrade and upgrade
 //   cap      the hub allows 2 faders: Voice and the split Music are both on the wire (5 layers)
+//   quality  the hub's splitMaxFaders 2 with 3 faders: no split
 //   nosplit  no split fader: today's layers and no second tap
 #include <obs.h>
 #include <obs-module.h>
@@ -416,6 +417,34 @@ static void run_cap(const char *server, const char *key)
 	obs_source_release(game);
 }
 
+// The hub allows a split with 2 faders at most (splitMaxFaders): 3 faders, split ticked and
+// picked: not on, today's layers, no second tap.
+static void run_quality(const char *server, const char *key)
+{
+	obs_source_t *voice = tone("voice", 440, 0.5, 1 | 4), *tw = tone("tw-music", 880, 0.3, 1), *yt = tone("yt-music", 1320, 0.25, 4), *game = tone("game", 660, 0.2, 1 | 4);
+	obs_set_output_source(1, voice);
+	obs_set_output_source(2, tw);
+	obs_set_output_source(3, yt);
+	obs_set_output_source(4, game);
+	configure(server, key, "Voice,Music,Game");
+	place("voice", "f:Voice");
+	place("game", "f:Game");
+	bool made = make_split(1, "Music", "tw-music", "yt-music", 3);
+	pump_for(2000);
+	window(1000, 1000);
+	result(made && !flag("on") && strstr(stats, "\"why\":\"quality\"") && num("stems") == 4 && num("taps") == 1, "quality 1 3 faders over splitMaxFaders 2: off, today's 4 layers",
+	       "made %d; %s", made, stats);
+	printf("STEP done\n");
+	fflush(stdout);
+	pump_for(500);
+	for (int ch = 1; ch <= 4; ch++)
+		obs_set_output_source(ch, NULL);
+	obs_source_release(voice);
+	obs_source_release(tw);
+	obs_source_release(yt);
+	obs_source_release(game);
+}
+
 static void run_nosplit(const char *server, const char *key)
 {
 	obs_source_t *voice = tone("voice", 440, 0.5, 1), *game = tone("game", 660, 0.4, 1), *music = tone("music", 880, 0.3, 1);
@@ -473,6 +502,8 @@ int main(int argc, char **argv)
 		run_split(argv[1], argv[2]);
 	else if (!strcmp(argv[3], "cap"))
 		run_cap(argv[1], argv[2]);
+	else if (!strcmp(argv[3], "quality"))
+		run_quality(argv[1], argv[2]);
 	else
 		run_nosplit(argv[1], argv[2]);
 	obs_wait_for_destroy_queue();

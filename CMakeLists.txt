@@ -247,7 +247,7 @@ foreach(split_test faders-split faders-split-mix)
   endif()
   add_dependencies(${split_test} faders)
 endforeach()
-foreach(scenario window free noyoutube onlytwo roundtrip reload downgrade counts report)
+foreach(scenario window free noyoutube onlytwo roundtrip reload downgrade counts report quality)
   add_test(NAME split-${scenario} COMMAND faders-split ${scenario})
 endforeach()
 

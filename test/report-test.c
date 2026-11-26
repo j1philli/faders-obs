@@ -219,6 +219,13 @@ int main(int argc, char **argv)
 		       has(down_report, "YT Music (Music's YouTube source, until it's on)") && has(down_report, "\"on\": false, \"why\": \"plan\"") && !has(down_report, "**Music**: Spotify, YT Music"),
 	       "split off: why, and the YouTube source in Everything else", "%s", "");
 	free(down_report);
+	struct fdr_report_input q = fixture(true);
+	q.split = (struct fdr_report_split){"Music", false, "quality", "Spotify", "YT Music", 3, "", 2};
+	char *q_report = NULL;
+	fdr_report_build(&q, &q_report);
+	result(has(q_report, "Music, off (too many faders for two sources at this audio quality: max 2 with a split)") && has(q_report, "\"why\": \"quality\"") && has(q_report, "\"split_max_faders\": 2"),
+	       "split off for the hub's splitMaxFaders: why, and the max", "%s", "");
+	free(q_report);
 	struct fdr_report_input none = fixture(true);
 	none.split = (struct fdr_report_split){"", false, "none", "", "", 0, ""};
 	char *none_report = NULL;

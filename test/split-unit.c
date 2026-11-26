@@ -168,6 +168,24 @@ static void effective(void)
 	struct fdr_split_state s14 = eval(&PRO, "a", 1, true, true, &l14), s13 = eval(&PRO, "a", 1, true, true, &l13);
 	result(!s14.on && s14.why == FDR_SPLIT_TOO_MANY && s13.on, "effective: the wire's 16 layers hold 13 faders + split", "14: %s, 13: %s", fdr_split_why_name(s14.why), fdr_split_why_name(s13.why));
 
+	// The hub's splitMaxFaders (quality message): more faders on the wire than that, and the split
+	// is off (late joiners would get too little catch-up); absent (0) is no limit.
+	struct fdr_split_input q3 = {&FADERS, "Music", 3, PRO, true, true, 3}, q4 = {&FADERS, "Music", 3, PRO, true, true, 4}, q0 = {&FADERS, "Music", 3, PRO, true, true, 0};
+	struct fdr_split_state s_q3, s_q4, s_q0;
+	fdr_split_evaluate(&q3, &s_q3);
+	fdr_split_evaluate(&q4, &s_q4);
+	fdr_split_evaluate(&q0, &s_q0);
+	const char *const capped[] = {"Voice", "Game", "Music", "Discord"};
+	struct fdr_fader_list l2 = {capped, 4, 2}; // the plan sends 2: the split counts as one of them
+	struct fdr_split_input q_plan = {&l2, "Game", 3, PRO, true, true, 2};
+	struct fdr_split_state s_qp;
+	fdr_split_evaluate(&q_plan, &s_qp);
+	result(!s_q3.on && s_q3.why == FDR_SPLIT_QUALITY && !strcmp(fdr_split_why_name(s_q3.why), "quality") && s_q4.on && s_q0.on && s_qp.on,
+	       "splitMaxFaders: 4 faders over a max of 3 is off; 4, none, and 2 on the wire are on", "max 3: %s, max 4: %s, none: %s, 2 of 4 on the wire with max 2: %s", fdr_split_why_name(s_q3.why),
+	       fdr_split_why_name(s_q4.why), fdr_split_why_name(s_q0.why), fdr_split_why_name(s_qp.why));
+	enum fdr_split_role yt_q = fdr_split_role(&s_q3, "Music", "Music", FDR_PLATFORM_YOUTUBE, true);
+	result(yt_q == FDR_SPLIT_ROLE_PARKED, "splitMaxFaders: off keeps the picks (YouTube source parked)", "%s", fdr_split_role_name(yt_q));
+
 	// Counts as one fader: the plan counts faders; the wire carries two more layers.
 	result(fdr_split_wire_stems(4, false) == 5 && fdr_split_wire_stems(4, true) == 7 && fdr_split_wire_stems(3, true) == 6, "counts as 1 fader (4 faders: 5 layers, 7 split)",
 	       "%d / %d / %d", fdr_split_wire_stems(4, false), fdr_split_wire_stems(4, true), fdr_split_wire_stems(3, true));

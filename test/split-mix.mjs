@@ -5,7 +5,8 @@
 // for a downgrade and an upgrade) and checks the stems and status messages the hub got:
 //   split    the split stems message, byte for byte; the status's split warnings; after the
 //            downgrade, today's stems message exactly; after the upgrade, the split's again
-//   cap      maxStems 2 counts the split fader once
+//   cap      maxStems 2 counts the split fader once (and splitMaxFaders 2 allows it)
+//   quality  splitMaxFaders 2 with 3 faders: today's stems message, byte for byte
 //   nosplit  no split fader: today's stems message, byte for byte, and no split in the status
 // Run after building: node test/split-mix.mjs [split|cap|nosplit ...]
 import assert from "node:assert/strict";
@@ -71,7 +72,7 @@ async function run(mode, port, hubArgs, onStep) {
   await once(hub, "exit");
 }
 
-const modes = process.argv.slice(2).length ? process.argv.slice(2) : ["split", "cap", "nosplit"];
+const modes = process.argv.slice(2).length ? process.argv.slice(2) : ["split", "cap", "quality", "nosplit"];
 const pro = ["--plan", "pro", "--youtube", "--kbps", "128"];
 const splitOn = '{"type":"stems","stems":[{"id":0,"name":"Voice"},{"id":1,"name":"Music","fader":"f1","platform":"twitch"},{"id":2,"name":"Music","fader":"f1","platform":"youtube"},{"id":3,"name":"Everything else","rest":true,"platform":"twitch"},{"id":4,"name":"Everything else","rest":true,"platform":"youtube"}]}';
 const splitOff = '{"type":"stems","stems":[{"id":0,"name":"Voice"},{"id":1,"name":"Music"},{"id":2,"name":"Everything else","rest":true}]}';
@@ -107,8 +108,19 @@ if (modes.includes("split"))
   });
 
 if (modes.includes("cap"))
-  await run("cap", basePort + 1, [...pro, "--max-stems", "2"], async (step, { hub, channel }) => {
-    if (step === "done") check(lastOf(hub, channel, "stems") === splitOn, "cap: maxStems 2 counts the split fader once", lastOf(hub, channel, "stems"));
+  await run("cap", basePort + 1, [...pro, "--max-stems", "2", "--split-max-faders", "2"], async (step, { hub, channel }) => {
+    if (step === "done") check(lastOf(hub, channel, "stems") === splitOn, "cap: maxStems 2 counts the split fader once; splitMaxFaders 2 allows it", lastOf(hub, channel, "stems"));
+  });
+
+if (modes.includes("quality"))
+  await run("quality", basePort + 3, [...pro, "--split-max-faders", "2"], async (step, { hub, channel }) => {
+    if (step === "done") {
+      const want = '{"type":"stems","stems":[{"id":0,"name":"Voice"},{"id":1,"name":"Music"},{"id":2,"name":"Game"},{"id":3,"name":"Everything else","rest":true}]}';
+      const stems = messages(hub, channel).filter((t) => t.startsWith('{"type":"stems"'));
+      check(stems.length > 0 && stems.every((s) => s === want), "quality: over splitMaxFaders, no split stems are ever sent", stems.join(" | "));
+      const status = messages(hub, channel).filter((t) => t.startsWith('{"type":"status"'));
+      check(status.every((s) => !s.includes('"split"')), "quality: no split in the status", status.join(" | "));
+    }
   });
 
 if (modes.includes("nosplit"))
