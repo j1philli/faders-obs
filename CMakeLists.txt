@@ -169,6 +169,24 @@ else()
   endif()
 endif()
 
+# A stem layout change keeps every stem on the same timeline (test/uplink-timeline.c): the real
+# uplink compiled in, no thread, no clock, no network; chunks decoded with libopus.
+add_executable(faders-uplink-timeline test/uplink-timeline.c src/split.c src/placement.c src/logring.c)
+target_include_directories(faders-uplink-timeline PRIVATE ${OBS_INCLUDES} "${CMAKE_SOURCE_DIR}/src" "${OPUS_ROOT}/include")
+target_link_libraries(faders-uplink-timeline PRIVATE Threads::Threads)
+target_compile_definitions(faders-uplink-timeline PRIVATE FDR_VERSION_STR="${PROJECT_VERSION}")
+if(APPLE)
+  target_link_options(faders-uplink-timeline PRIVATE "-F${FRAMEWORKS}" "-Wl,-rpath,${FRAMEWORKS}")
+  target_link_libraries(faders-uplink-timeline PRIVATE "-framework libobs" "${OPUS_ROOT}/lib/libopus.a")
+else()
+  target_link_libraries(faders-uplink-timeline PRIVATE ${OBS_IMPORT_LIBS} "${OPUS_LIB}")
+  if(NOT MSVC)
+    target_link_options(faders-uplink-timeline PRIVATE -static-libgcc -static)
+    target_compile_options(faders-uplink-timeline PRIVATE ${MINGW_SHIM})
+  endif()
+endif()
+add_test(NAME uplink-timeline COMMAND faders-uplink-timeline)
+
 # Panel listing tests: "What's on each fader" when a fader has 2+ sources, one executable per
 # test/panel-listing-*.c (shared harness: test/panel-listing.h).
 file(GLOB PANEL_LISTING_TESTS CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/test/panel-listing-*.c")

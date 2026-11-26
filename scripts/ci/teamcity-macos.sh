@@ -37,6 +37,8 @@ ctest --test-dir build -R '^split-' --output-on-failure || { echo "##teamcity[bu
 ctest --test-dir build -R '^debug-' --output-on-failure || { echo "##teamcity[buildProblem description='debug report: a redaction, log ring or report check failed']"; exit 1; }
 # The duplicate warning's three-window rule, tick by tick (test/oracle-streak.c: no audio thread, no clock).
 ctest --test-dir build -R oracle-streak --output-on-failure
+# A stem layout change keeps every stem on the same timeline (test/uplink-timeline.c: the uplink, no clock).
+ctest --test-dir build -R uplink-timeline --output-on-failure || { echo "##teamcity[buildProblem description='uplink: a layout change moved the stems in time']"; exit 1; }
 
 # libobs behaviour the virtual mixer relies on (PROTOCOL.md "Virtual mixer"): every check must pass.
 build/faders-mixcheck > mixcheck.log 2>&1 || { grep -E "^(PASS|FAIL|SKIP)" mixcheck.log; echo "##teamcity[buildProblem description='faders-mixcheck: a libobs mixer assumption failed']"; exit 1; }
