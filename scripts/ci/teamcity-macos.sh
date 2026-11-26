@@ -92,6 +92,9 @@ grep -q '"mixMismatch"' hub.log && { echo "##teamcity[buildProblem description='
 build/faders-mixtest "ws://127.0.0.1:$PORT/ingest/mix_channel" dev-token > mixtest.log 2>&1 || { grep -E "^(PASS|FAIL|SKIP)" mixtest.log; echo "##teamcity[buildProblem description='faders-mixtest: a virtual-mixer case failed']"; exit 1; }
 grep -E "^(PASS|FAIL|SKIP)" mixtest.log
 grep -q '"mixMismatch":"injected"' hub.log || { echo "##teamcity[buildProblem description='the injected mismatch was not reported to the hub']"; exit 1; }
+# A fade's incoming scene on its first tick (case 7c), in a process with no audio buffering.
+build/faders-mixtest "ws://127.0.0.1:$PORT/ingest/mix_start" dev-token fade-start > mixtest-start.log 2>&1 || { grep -E "^(PASS|FAIL|SKIP)" mixtest-start.log; echo "##teamcity[buildProblem description='faders-mixtest: a fade leaked its incoming scene into Everything else']"; exit 1; }
+grep -E "^(PASS|FAIL|SKIP)" mixtest-start.log
 build/faders-mixtest "ws://127.0.0.1:$PORT/ingest/mix_wire" dev-token wire > mixtest-wire.log 2>&1 &
 HOST=$!
 sleep 5
