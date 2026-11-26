@@ -60,6 +60,7 @@ struct fdr_splitmix {
 	// The account (hub hello), as last read.
 	char plan[24];
 	bool twitch, youtube;
+	int max_faders; // the hub's splitMaxFaders (0 = no limit)
 	// The split fader's sources (the first of each platform), found by refresh.
 	obs_weak_source_t *tw, *yt;
 	bool yt_force; // test hook: FDR_FORCE_SETTING on the YouTube source
@@ -181,10 +182,11 @@ void fdr_splitmix_set_stream_track(fdr_splitmix_t *s, int stream_track)
 	pthread_mutex_unlock(&s->mu);
 }
 
-static void read_account(struct fdr_splitmix *s, char plan[24], bool *twitch, bool *youtube)
+static void read_account(struct fdr_splitmix *s, char plan[24], bool *twitch, bool *youtube, int *max_faders)
 {
 	fdr_uplink_status st;
 	fdr_uplink_get_status(s->uplink, &st);
+	*max_faders = st.split_max_faders;
 	// As the hub's last hello said (kept across a reconnect, which says it again).
 	snprintf(plan, 24, "%s", st.plan);
 	*twitch = strstr(st.platforms, "twitch") != NULL;
@@ -223,7 +225,8 @@ bool fdr_splitmix_refresh(fdr_splitmix_t *s)
 	pthread_mutex_lock(&s->tap_mu);
 	char plan[24];
 	bool twitch, youtube;
-	read_account(s, plan, &twitch, &youtube);
+	int max_faders;
+	read_account(s, plan, &twitch, &youtube, &max_faders);
 
 	pthread_mutex_lock(&s->mu);
 	char fader[FDR_STEM_NAME_MAX];
@@ -248,11 +251,12 @@ bool fdr_splitmix_refresh(fdr_splitmix_t *s)
 	snprintf(s->plan, sizeof(s->plan), "%s", plan);
 	s->twitch = twitch;
 	s->youtube = youtube;
+	s->max_faders = max_faders;
 	const char *names[FDR_MAX_FADERS];
 	for (int i = 0; i < s->n_wire; i++)
 		names[i] = s->names[i];
 	struct fdr_fader_list list = {names, s->n_wire, s->n_wire};
-	struct fdr_split_input in = {&list, s->fader, s->youtube_track, {s->plan, twitch, youtube}, f.tw != NULL, f.yt != NULL};
+	struct fdr_split_input in = {&list, s->fader, s->youtube_track, {s->plan, twitch, youtube}, f.tw != NULL, f.yt != NULL, max_faders};
 	struct fdr_split_state state;
 	fdr_split_evaluate(&in, &state);
 	if (state.on && !s->on) {
@@ -361,7 +365,8 @@ bool fdr_splitmix_poll(fdr_splitmix_t *s)
 		return false;
 	char plan[24];
 	bool twitch, youtube;
-	read_account(s, plan, &twitch, &youtube);
+	int max_faders;
+	read_account(s, plan, &twitch, &youtube, &max_faders);
 	pthread_mutex_lock(&s->mu);
 	obs_weak_source_t *tw = s->tw, *yt = s->yt;
 	obs_weak_source_addref(tw);
@@ -369,7 +374,7 @@ bool fdr_splitmix_poll(fdr_splitmix_t *s)
 	pthread_mutex_unlock(&s->mu);
 	uint32_t tw_mixers = mixers_of(tw), yt_mixers = mixers_of(yt);
 	pthread_mutex_lock(&s->mu);
-	bool changed = strcmp(plan, s->plan) != 0 || twitch != s->twitch || youtube != s->youtube;
+	bool changed = strcmp(plan, s->plan) != 0 || twitch != s->twitch || youtube != s->youtube || max_faders != s->max_faders;
 	int track = s->wire_index >= 0 ? s->youtube_track : 0;
 	unsigned w = 0;
 	if (track) {

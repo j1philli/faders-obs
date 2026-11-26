@@ -54,6 +54,7 @@ typedef struct fdr_uplink_status {
 	bool split;                // the stems include a split fader (two more layers: PROTOCOL-SPLIT.md)
 	int split_track;           // while split: the OBS track that goes to YouTube; 0 = no split
 	unsigned split_warnings;   // while split: FDR_SPLIT_WARN_* bits, sent with the status
+	int split_max_faders;      // the hub's splitMaxFaders (split.h): 0 = not sent (no limit), < 0 = none allowed
 } fdr_uplink_status;
 
 fdr_uplink_t *fdr_uplink_start(const fdr_uplink_config *cfg);

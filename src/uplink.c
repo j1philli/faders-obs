@@ -337,7 +337,7 @@ static void on_text(void *param, const char *text)
 	if (!strcmp(text, "pong"))
 		return;
 	// The hub sends {"type":"listeners","n":N}, {"type":"update","latest":"X.Y.Z"},
-	// {"type":"quality","kbps":N,"maxStems":M} and {"type":"hello","channel":…,"plan":…,
+	// {"type":"quality","kbps":N,"maxStems":M,"splitMaxFaders":S} and {"type":"hello","channel":…,"plan":…,
 	// "limit":N,"twitch":bool,"youtube":bool}. Parsed as JSON so a value is never mistaken for a key.
 	obs_data_t *message = obs_data_create_from_json(text);
 	if (!message)
@@ -360,6 +360,13 @@ static void on_text(void *param, const char *text)
 		if (m > 0) {
 			u->max_stems = m > MAX_STEMS ? MAX_STEMS : (int)m;
 			u->status.max_stems = u->max_stems;
+		}
+		// The most faders with which a split fader is allowed at this quality (absent: no limit).
+		if (obs_data_has_user_value(message, "splitMaxFaders")) {
+			long long s = obs_data_get_int(message, "splitMaxFaders");
+			u->status.split_max_faders = s > 0 ? (s > MAX_STEMS ? MAX_STEMS : (int)s) : -1;
+		} else {
+			u->status.split_max_faders = 0;
 		}
 		pthread_mutex_unlock(&u->mu);
 	} else if (!strcmp(type, "hello")) {

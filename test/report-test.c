@@ -200,7 +200,7 @@ int main(int argc, char **argv)
 
 	// The split: one line, and the same facts in the JSON, names on and off.
 	bool split_on = has(with_names, "- **Per-platform fader**: Music, on · Twitch: Spotify · YouTube: YT Music on Track 3 · Twitch source is also on the YouTube track") &&
-			has(with_names, "\"split\": {\"fader\": \"Music\", \"ticked\": true, \"on\": true, \"why\": \"on\", \"twitch_source\": \"Spotify\", \"youtube_source\": \"YT Music\", \"youtube_track\": 3, \"warnings\": [\"twitch-source-on-youtube-track\"]}");
+			has(with_names, "\"split\": {\"fader\": \"Music\", \"ticked\": true, \"on\": true, \"why\": \"on\", \"twitch_source\": \"Spotify\", \"youtube_source\": \"YT Music\", \"youtube_track\": 3, \"split_max_faders\": 0, \"warnings\": [\"twitch-source-on-youtube-track\"]}");
 	bool split_off_names = has(no_names, "- **Per-platform fader**: Fader 3, on · Twitch: Source 3 · YouTube: Source 11 on Track 3") &&
 			       has(no_names, "\"twitch_source\": \"Source 3\", \"youtube_source\": \"Source 11\"");
 	result(split_on && split_off_names, "split: one line and the JSON, names on and off", "names on %d, names off %d", split_on, split_off_names);

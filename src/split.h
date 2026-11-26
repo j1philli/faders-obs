@@ -98,6 +98,7 @@ enum fdr_split_why {
 	FDR_SPLIT_NO_YOUTUBE_SOURCE,
 	FDR_SPLIT_NO_TRACK,       // the YouTube track isn't picked
 	FDR_SPLIT_TOO_MANY,       // faders + 3 layers wouldn't fit the wire's 16
+	FDR_SPLIT_QUALITY,        // more faders than the hub's splitMaxFaders allows at this quality
 };
 struct fdr_split_input {
 	const struct fdr_fader_list *faders; // as configured, with the plan's allowance
@@ -105,6 +106,10 @@ struct fdr_split_input {
 	int youtube_track;                   // 0 = not picked
 	struct fdr_account account;
 	bool twitch_source, youtube_source;  // picked (and present)
+	// The hub's splitMaxFaders (quality message): the most faders on the wire, the split fader
+	// included, with which the split still leaves late joiners enough catch-up at the channel's
+	// audio quality. 0 = no limit (an older hub doesn't send it); < 0 = no split at this quality.
+	int max_faders;
 };
 struct fdr_split_state {
 	bool on;

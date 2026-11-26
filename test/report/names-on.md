@@ -56,7 +56,7 @@ Not placed yet 2 · muted 1 · monitor only 1 · not on Track 1 2
  "account": {"channel": "NightOwlPlays", "plan": "pro", "platforms": ["twitch", "youtube"], "listener_limit": 50, "max_stems": 5},
  "connection": {"running": true, "connected": true, "ever_connected": true, "server": "wss://hub.faders.tv/ingest", "listeners": 3, "uplink_kbps": 480, "chunks_sent": 4552, "stems_on_wire": 5, "stream_track": 1, "stream_track_silent": false, "last_failure": "connect to [ip]:443 failed", "rejected_status": 0},
  "problems": {"mix_mismatch": "Música 🎵", "mix_duplicate": "Alert Box (browser)"},
- "split": {"fader": "Music", "ticked": true, "on": true, "why": "on", "twitch_source": "Spotify", "youtube_source": "YT Music", "youtube_track": 3, "warnings": ["twitch-source-on-youtube-track"]},
+ "split": {"fader": "Music", "ticked": true, "on": true, "why": "on", "twitch_source": "Spotify", "youtube_source": "YT Music", "youtube_track": 3, "split_max_faders": 0, "warnings": ["twitch-source-on-youtube-track"]},
  "faders": [
   {"name": "Voice", "on_wire": true, "sources": ["Mic/Aux"]},
   {"name": "Game", "on_wire": true, "sources": ["Game Capture"]},

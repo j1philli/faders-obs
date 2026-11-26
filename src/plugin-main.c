@@ -689,6 +689,7 @@ static uint64_t status_fingerprint(const fdr_uplink_status *st)
 	MIX(st->listener_limit);
 	MIX(st->split);
 	MIX(st->split_warnings);
+	MIX(st->split_max_faders);
 	MIX(streaming);
 	MIX(mixer_unavailable);
 	for (const char *p = st->mix_mismatch; *p; p++)
@@ -785,11 +786,12 @@ static void refresh_window(void *unused)
 	if (st.connected && st.channel[0] &&
 	    (strcmp(obs_data_get_string(s, "account"), st.channel) != 0 || strcmp(obs_data_get_string(s, "account_key"), tail) != 0 ||
 	     (st.max_stems > 0 && obs_data_get_int(s, "account_faders") != st.max_stems) || strcmp(obs_data_get_string(s, "account_plan"), st.plan) != 0 ||
-	     strcmp(obs_data_get_string(s, "account_platforms"), st.platforms) != 0)) {
+	     strcmp(obs_data_get_string(s, "account_platforms"), st.platforms) != 0 || obs_data_get_int(s, "account_split_max_faders") != st.split_max_faders)) {
 		obs_data_set_string(s, "account", st.channel);
 		obs_data_set_string(s, "account_key", tail);
 		obs_data_set_string(s, "account_plan", st.plan);
 		obs_data_set_string(s, "account_platforms", st.platforms);
+		obs_data_set_int(s, "account_split_max_faders", st.split_max_faders);
 		if (st.max_stems > 0)
 			obs_data_set_int(s, "account_faders", st.max_stems);
 		save_settings(s);
@@ -986,6 +988,7 @@ static int effective_placement(const struct fader_set *f, obs_source_t *s, enum 
 struct account_view {
 	char plan[24];
 	struct fdr_account a;
+	int split_max_faders; // the hub's splitMaxFaders (split.h): 0 = no limit
 };
 static void known_account(obs_data_t *settings, const fdr_uplink_status *st, struct account_view *v)
 {
@@ -995,6 +998,7 @@ static void known_account(obs_data_t *settings, const fdr_uplink_status *st, str
 	const char *platforms = live ? st->platforms : remembered ? obs_data_get_string(settings, "account_platforms") : "";
 	snprintf(v->plan, sizeof(v->plan), "%s", plan);
 	v->a = (struct fdr_account){v->plan, strstr(platforms, "twitch") != NULL, strstr(platforms, "youtube") != NULL};
+	v->split_max_faders = live ? st->split_max_faders : remembered ? (int)obs_data_get_int(settings, "account_split_max_faders") : 0;
 }
 
 static enum fdr_platform platform_of(obs_source_t *s)
@@ -1072,7 +1076,7 @@ static void split_view_get(obs_data_t *settings, struct split_view *v)
 	int t = (int)obs_data_get_int(settings, FDR_SPLIT_TRACK_KEY);
 	v->track = t >= 1 && t <= 6 ? t : 0;
 	find_split_sources(v->fader, &v->src);
-	struct fdr_split_input in = {&v->faders.list, v->fader, v->track, v->acc.a, v->src.tw != NULL, v->src.yt != NULL};
+	struct fdr_split_input in = {&v->faders.list, v->fader, v->track, v->acc.a, v->src.tw != NULL, v->src.yt != NULL, v->acc.split_max_faders};
 	fdr_split_evaluate(&in, &v->state);
 	int stream = stream_audio_track();
 	v->stream_track = stream ? stream : 1;
@@ -1324,6 +1328,13 @@ static void add_split_block(obs_properties_t *group, struct dialog_model *m, int
 		break;
 	case FDR_SPLIT_TOO_MANY:
 		dstr_catf(&text, "<br><b>Off:</b> with a fader split per platform, the stream holds %d faders at most.", FDR_SPLIT_STEMS_MAX - 1 - FDR_SPLIT_EXTRA);
+		break;
+	case FDR_SPLIT_QUALITY:
+		// The hub's splitMaxFaders: more would leave viewers who join late too little catch-up.
+		if (v->acc.split_max_faders > 0)
+			dstr_catf(&text, "<br><b>Off for now:</b> Too many faders for two sources at this audio quality (max %d with a split). Your picks are kept.", v->acc.split_max_faders);
+		else
+			dstr_cat(&text, "<br><b>Off for now:</b> two sources aren't available at this audio quality. Your picks are kept.");
 		break;
 	default: {
 		dstr_cat(&text, "<br><b>To turn it on, pick</b> ");
@@ -2411,7 +2422,7 @@ static bool debug_report(bool names, char **report, const char **error)
 		.mix_mismatch = st.mix_mismatch,
 		.mix_duplicate = st.mix_duplicate,
 		.split = {split.fader, split.state.on, fdr_split_why_name(split.state.why), split.src.tw ? obs_source_get_name(split.src.tw) : "",
-			  split.src.yt ? obs_source_get_name(split.src.yt) : "", split.track, split_codes},
+			  split.src.yt ? obs_source_get_name(split.src.yt) : "", split.track, split_codes, split.acc.split_max_faders},
 		.faders = faders,
 		.n_faders = r.faders.list.n,
 		.allowance = known_allowance(settings, &st, &allow_plan),

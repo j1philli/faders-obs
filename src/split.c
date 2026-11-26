@@ -197,6 +197,7 @@ const char *fdr_split_reject_name(enum fdr_split_reject r)
 
 void fdr_split_evaluate(const struct fdr_split_input *in, struct fdr_split_state *out)
 {
+	int wire = in->faders->open > 0 && in->faders->open < in->faders->n ? in->faders->open : in->faders->n; // faders sent
 	out->on = false;
 	out->fader = has_split(in->split) ? fdr_place_find(in->faders, in->split) : -1;
 	if (out->fader < 0)
@@ -213,8 +214,10 @@ void fdr_split_evaluate(const struct fdr_split_input *in, struct fdr_split_state
 		out->why = FDR_SPLIT_NO_YOUTUBE_SOURCE;
 	else if (in->youtube_track < 1 || in->youtube_track > 6)
 		out->why = FDR_SPLIT_NO_TRACK;
-	else if (fdr_split_wire_stems(in->faders->open > 0 && in->faders->open < in->faders->n ? in->faders->open : in->faders->n, true) > FDR_SPLIT_STEMS_MAX)
+	else if (fdr_split_wire_stems(wire, true) > FDR_SPLIT_STEMS_MAX)
 		out->why = FDR_SPLIT_TOO_MANY;
+	else if (in->max_faders < 0 || (in->max_faders > 0 && wire > in->max_faders))
+		out->why = FDR_SPLIT_QUALITY;
 	else
 		out->why = FDR_SPLIT_ON;
 	out->on = out->why == FDR_SPLIT_ON;
@@ -241,6 +244,8 @@ const char *fdr_split_why_name(enum fdr_split_why w)
 		return "no track";
 	case FDR_SPLIT_TOO_MANY:
 		return "too many";
+	case FDR_SPLIT_QUALITY:
+		return "quality";
 	}
 	return "?";
 }

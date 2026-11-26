@@ -56,7 +56,7 @@ Not placed yet 2 · muted 1 · monitor only 1 · not on Track 1 2
  "account": {"channel": "[channel]", "plan": "pro", "platforms": ["twitch", "youtube"], "listener_limit": 50, "max_stems": 5},
  "connection": {"running": true, "connected": true, "ever_connected": true, "server": "wss://hub.faders.tv/ingest", "listeners": 3, "uplink_kbps": 480, "chunks_sent": 4552, "stems_on_wire": 5, "stream_track": 1, "stream_track_silent": false, "last_failure": "connect to [ip]:443 failed", "rejected_status": 0},
  "problems": {"mix_mismatch": "Source 10", "mix_duplicate": "Source 5"},
- "split": {"fader": "Fader 3", "ticked": true, "on": true, "why": "on", "twitch_source": "Source 3", "youtube_source": "Source 11", "youtube_track": 3, "warnings": ["twitch-source-on-youtube-track"]},
+ "split": {"fader": "Fader 3", "ticked": true, "on": true, "why": "on", "twitch_source": "Source 3", "youtube_source": "Source 11", "youtube_track": 3, "split_max_faders": 0, "warnings": ["twitch-source-on-youtube-track"]},
  "faders": [
   {"name": "Fader 1", "on_wire": true, "sources": ["Source 1"]},
   {"name": "Fader 2", "on_wire": true, "sources": ["Source 2"]},

@@ -56,6 +56,7 @@ struct fdr_report_split {
 	const char *youtube_source; // free text, "" = not picked
 	int youtube_track;          // 1-6, 0 = not picked
 	const char *warnings;       // typed: the wire's warning codes, ","-joined, "" = none
+	int max_faders;             // the hub's splitMaxFaders: 0 = no limit, < 0 = none allowed
 };
 
 struct fdr_report_input {

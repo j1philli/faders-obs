@@ -562,6 +562,10 @@ int fdr_report_build(const struct fdr_report_input *in, char **result)
 		out_text(&o, split_fader);
 		if (sp->on)
 			out_str(&o, ", on");
+		else if (sp->why && !strcmp(sp->why, "quality") && sp->max_faders > 0)
+			out_fmt(&o, ", off (too many faders for two sources at this audio quality: max %d with a split)", sp->max_faders);
+		else if (sp->why && !strcmp(sp->why, "quality"))
+			out_str(&o, ", off (no split at this audio quality)");
 		else
 			out_fmt(&o, ", off (%s)", split_why(sp->why));
 		out_str(&o, " · Twitch: ");
@@ -740,7 +744,7 @@ int fdr_report_build(const struct fdr_report_input *in, char **result)
 	out_json(&o, split_tw);
 	out_str(&o, ", \"youtube_source\": ");
 	out_json(&o, split_yt);
-	out_fmt(&o, ", \"youtube_track\": %d, \"warnings\": [", sp->youtube_track);
+	out_fmt(&o, ", \"youtube_track\": %d, \"split_max_faders\": %d, \"warnings\": [", sp->youtube_track, sp->max_faders);
 	for (const char *w = sp->warnings ? sp->warnings : "", *sep = ""; *w; sep = ", ") {
 		size_t n = strcspn(w, ",");
 		char one[64];
