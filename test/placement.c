@@ -393,9 +393,9 @@ static int fader_rows(void)
 // One info line (by key), or "".
 static const char *info(const char *key)
 {
-	static struct dstr bufs[4];
+	static struct dstr bufs[8];
 	static int next;
-	struct dstr *o = &bufs[next++ % 4];
+	struct dstr *o = &bufs[next++ % 8];
 #define out (*o)
 	dstr_copy(&out, "");
 	char want[64];

@@ -4,18 +4,21 @@
 //                      {"type":"listeners","n":N} whenever the listener count changes, and
 //                      {"type":"quality","kbps":N,"maxStems":M} on connect when --kbps is given,
 //                      {"type":"update","latest":V} on connect when --update is given, and
-//                      {"type":"hello",…} on connect (channel = the path, --plan, --limit)
+//                      {"type":"hello",…} on connect (channel = the path, --plan, --limit,
+//                      Twitch always, YouTube with --youtube)
 //   /listen/<channel>  viewers: the plugin's {"type":"stems"} (if any), {"type":"backlog"} + up to
 //                      60 s of chunks, {"type":"live"}, then live
 //   POST /forget       {"channel":…}: drop that channel's ring, like a hub object that hibernated
+//   POST /hello        {"channel":…,"plan":…,"twitch":bool,"youtube":bool}: send that channel's
+//                      plugin a new hello (a plan change or a platform linked mid-stream)
 // Every text message from the plugin is logged ("plugin <channel>: ..."), for tests to grep.
 //
-//   node test/mock-hub.mjs [--port 8787] [--token dev-token] [--kbps 256] [--max-stems 4] [--update 0.9.0] [--plan free] [--limit 25]
+//   node test/mock-hub.mjs [--port 8787] [--token dev-token] [--kbps 256] [--max-stems 4] [--update 0.9.0] [--plan free] [--limit 25] [--youtube] [--split-max-faders N]
 import { createServer } from "node:http";
 import { parseArgs } from "node:util";
 import { WebSocketServer } from "ws";
 
-const { values: args } = parseArgs({ options: { port: { type: "string", default: "8787" }, token: { type: "string", default: "dev-token" }, kbps: { type: "string" }, "max-stems": { type: "string" }, update: { type: "string" }, plan: { type: "string", default: "free" }, limit: { type: "string", default: "25" } } });
+const { values: args } = parseArgs({ options: { port: { type: "string", default: "8787" }, token: { type: "string", default: "dev-token" }, kbps: { type: "string" }, "max-stems": { type: "string" }, update: { type: "string" }, plan: { type: "string", default: "free" }, limit: { type: "string", default: "25" }, youtube: { type: "boolean", default: false }, "split-max-faders": { type: "string" } } });
 const RING_MS = 60_000;
 const t0 = Date.now();
 const channels = new Map(); // name -> { ingest, listeners:Set, ring:[], lastSeq }
@@ -33,6 +36,16 @@ const server = createServer(async (req, res) => {
     const c = chan(JSON.parse(body).channel);
     c.ring = [];
     c.lastSeq = -1;
+    return res.end("ok");
+  }
+  // Test-only: a new hello to one channel's plugin, as the hub sends one on connect.
+  if (req.url === "/hello" && req.method === "POST") {
+    let body = "";
+    for await (const part of req) body += part;
+    const { channel, ...rest } = JSON.parse(body);
+    const c = chan(channel);
+    if (!c.ingest) return res.writeHead(404).end("no plugin");
+    c.ingest.send(JSON.stringify({ type: "hello", channel, limit: Number(args.limit), ...rest }));
     return res.end("ok");
   }
   if (req.url === "/health") return res.end("ok");
@@ -56,10 +69,10 @@ server.on("upgrade", (req, socket, head) => {
     if (role === "ingest") {
       c.ingest?.close(4000, "replaced by new ingest connection");
       c.ingest = ws;
-      if (args.kbps) ws.send(JSON.stringify({ type: "quality", kbps: Number(args.kbps), ...(args["max-stems"] ? { maxStems: Number(args["max-stems"]) } : {}) }));
+      if (args.kbps) ws.send(JSON.stringify({ type: "quality", kbps: Number(args.kbps), ...(args["max-stems"] ? { maxStems: Number(args["max-stems"]) } : {}), ...(args["split-max-faders"] ? { splitMaxFaders: Number(args["split-max-faders"]) } : {}) }));
       if (args.update) ws.send(JSON.stringify({ type: "update", latest: args.update }));
       // Who the key belongs to, as the real hub says it (Tools → Faders shows "Connected as …").
-      ws.send(JSON.stringify({ type: "hello", channel: name, plan: args.plan, limit: Number(args.limit), twitch: true, youtube: false }));
+      ws.send(JSON.stringify({ type: "hello", channel: name, plan: args.plan, limit: Number(args.limit), twitch: true, youtube: args.youtube }));
       notify(c);
       ws.on("message", (data, isBinary) => {
         if (!isBinary) {

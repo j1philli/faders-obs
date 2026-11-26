@@ -31,10 +31,14 @@ ctest --test-dir build -R panel-enumeration --output-on-failure
 # Placement: nothing is placed for you; moves are checked; the window follows the sources
 # (test/placement-unit.c, test/placement.c: no hub, no audio).
 ctest --test-dir build -R '^placement-' --output-on-failure || { echo "##teamcity[buildProblem description='faders-placement: a source was placed wrongly']"; exit 1; }
+# The split fader: model, golden stems/status JSON, and Tools → Faders (test/split-unit.c, test/split.c).
+ctest --test-dir build -R '^split-' --output-on-failure || { echo "##teamcity[buildProblem description='split fader: a model, window or wire check failed']"; exit 1; }
 # Debug report: redaction table, log ring, golden reports, fail closed (no hub, never uploaded).
 ctest --test-dir build -R '^debug-' --output-on-failure || { echo "##teamcity[buildProblem description='debug report: a redaction, log ring or report check failed']"; exit 1; }
 # The duplicate warning's three-window rule, tick by tick (test/oracle-streak.c: no audio thread, no clock).
 ctest --test-dir build -R oracle-streak --output-on-failure
+# A stem layout change keeps every stem on the same timeline (test/uplink-timeline.c: the uplink, no clock).
+ctest --test-dir build -R uplink-timeline --output-on-failure || { echo "##teamcity[buildProblem description='uplink: a layout change moved the stems in time']"; exit 1; }
 
 # libobs behaviour the virtual mixer relies on (PROTOCOL.md "Virtual mixer"): every check must pass.
 build/faders-mixcheck > mixcheck.log 2>&1 || { grep -E "^(PASS|FAIL|SKIP)" mixcheck.log; echo "##teamcity[buildProblem description='faders-mixcheck: a libobs mixer assumption failed']"; exit 1; }
@@ -110,6 +114,9 @@ for _ in $(seq 1 30); do curl -s "localhost:$F_PORT/health" | grep -q ok && brea
 build/faders-mixtest "ws://127.0.0.1:$F_PORT/ingest/mix_fold" dev-token fold > mixtest-fold.log 2>&1 || { grep -E "^(PASS|FAIL|SKIP)" mixtest-fold.log; echo "##teamcity[buildProblem description='faders-mixtest: the plan cap did not fold faders']"; exit 1; }
 grep -E "^(PASS|FAIL|SKIP)" mixtest-fold.log
 kill $FHUB 2>/dev/null || true
+
+# The split fader's mixing and wire through the real plugin (test/split-mix.mjs runs its own mock hubs).
+node test/split-mix.mjs || { echo "##teamcity[buildProblem description='split fader: a mixing or wire check failed']"; exit 1; }
 
 # The hub sets the channel's audio quality; the plugin follows it.
 Q_PORT=$((PORT + 1))

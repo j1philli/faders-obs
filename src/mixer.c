@@ -10,6 +10,7 @@
  */
 #include "mixer.h"
 #include "placement.h"
+#include "splitmix.h"
 #include "logring.h"
 
 #include <obs-module.h>
@@ -88,6 +89,7 @@ struct stats {
 
 struct fdr_mixer {
 	fdr_uplink_t *uplink;
+	fdr_splitmix_t *split; // the split fader's YouTube side (splitmix.h); idle without a split
 	int stream_track; // 1-6
 	size_t mix_idx;
 	uint32_t stream_bit;
@@ -128,6 +130,7 @@ struct fdr_mixer {
 };
 
 static void announce(struct fdr_mixer *m);
+static void split_refresh(struct fdr_mixer *m);
 
 static inline bool near(uint64_t a, uint64_t b)
 {
@@ -671,7 +674,8 @@ static void on_track(void *param, size_t mix_idx, struct audio_data *data)
 	pthread_mutex_unlock(&m->mu);
 	for (int i = 0; i < n_held; i++)
 		obs_source_release(held[i]);
-	fdr_uplink_push_tick(m->uplink, ts, outp, n_wire + 1, FRAMES, track_peak);
+	if (!fdr_splitmix_tick(m->split, ts, outp, n_wire + 1, trk_l, trk_r, track_peak, fading, oracle_hold))
+		fdr_uplink_push_tick(m->uplink, ts, outp, n_wire + 1, FRAMES, track_peak);
 }
 
 // ── Main thread: assignments ────────────────────────────────────────────────────────────
@@ -691,6 +695,10 @@ static int resolve_fader(struct fdr_mixer *m, obs_source_t *src, enum fdr_state 
 	enum fdr_saved saved = !has ? FDR_SAVED_NEW : *name ? FDR_SAVED_FADER : FDR_SAVED_REST;
 	int idx = fdr_place_effective(&l, saved, name, false, state);
 	obs_data_release(priv);
+	// The split fader's YouTube source (and anything else on it but its Twitch source) is never
+	// in these lanes: splitmix.c mixes it, or it plays in Everything else.
+	if (idx >= 0 && fdr_splitmix_parks(m->split, src))
+		idx = -1;
 	return idx < 0 ? REST : idx;
 }
 
@@ -825,6 +833,7 @@ void fdr_mixer_rebuild(fdr_mixer_t *m)
 {
 	if (!m)
 		return;
+	split_refresh(m);
 	struct snapshot *snap = bzalloc(sizeof(*snap));
 	pthread_mutex_lock(&m->mu);
 	struct collect c = {m, snap};
@@ -944,6 +953,8 @@ static void *rebuild_thread(void *param)
 			pthread_mutex_unlock(&m->mu);
 			m->dirty = true;
 		}
+		if (fdr_splitmix_poll(m->split))
+			m->dirty = true; // the hub's hello changed: the split may turn on or off
 		if (m->dirty) {
 			m->dirty = false;
 			fdr_mixer_rebuild(m);
@@ -1000,6 +1011,7 @@ fdr_mixer_t *fdr_mixer_start(fdr_uplink_t *uplink, int stream_track)
 	m->stream_track = stream_track < 1 || stream_track > 6 ? 1 : stream_track;
 	m->mix_idx = (size_t)(m->stream_track - 1);
 	m->stream_bit = 1u << m->mix_idx;
+	m->split = fdr_splitmix_create(uplink, m->stream_track);
 	connect_signals(m, true);
 	fdr_mixer_rebuild(m);
 	os_event_init(&m->stop_ev, OS_EVENT_TYPE_MANUAL);
@@ -1018,6 +1030,8 @@ void fdr_mixer_stop(fdr_mixer_t *m)
 	os_event_signal(m->stop_ev);
 	pthread_join(m->thread, NULL);
 	os_event_destroy(m->stop_ev);
+	fdr_splitmix_destroy(m->split); // its tap stops here
+	m->split = NULL;
 	// Every other thread that touches the mixer has stopped. A transition handler may still be
 	// running: disconnecting waits for it, so m->mu must be free here.
 	obs_source_t *t = m->tr ? obs_weak_source_get_source(m->tr) : NULL;
@@ -1051,6 +1065,7 @@ void fdr_mixer_set_stream_track(fdr_mixer_t *m, int stream_track)
 	m->mix_idx = (size_t)(stream_track - 1);
 	m->stream_bit = 1u << m->mix_idx;
 	pthread_mutex_unlock(&m->mu);
+	fdr_splitmix_set_stream_track(m->split, stream_track);
 	tap(m, true);
 }
 
@@ -1061,6 +1076,8 @@ static void announce(struct fdr_mixer *m)
 	int n = m->n_wire;
 	for (int i = 0; i < n; i++)
 		names[i] = m->names[i];
+	if (fdr_splitmix_announce(m->split, names, n))
+		return; // the split's layout (two more layers)
 	names[n] = "Everything else";
 	fdr_uplink_set_stems(m->uplink, names, n + 1, true);
 }
@@ -1182,5 +1199,23 @@ void fdr_mixer_stats_json(fdr_mixer_t *m, struct dstr *out)
 	}
 	dstr_catf(out, "],\"cb_us\":{\"p50\":%.1f,\"p99\":%.1f,\"max\":%.1f,\"n\":%d},\"mismatch\":\"%s\",\"duplicate\":\"%s\",\"fading\":%s}", p50, p99, mx, st.n_cb, m->mismatch, m->duplicate, m->fade.active ? "true" : "false");
 	memset(&m->st, 0, sizeof(m->st));
+	pthread_mutex_unlock(&m->mu);
+}
+
+// ── Split fader ─────────────────────────────────────────────────────────────────────────
+
+fdr_splitmix_t *fdr_mixer_split(fdr_mixer_t *m)
+{
+	return m ? m->split : NULL;
+}
+
+// Not locked. The split fader's sources and the hub's account, before the sources are collected
+// (they decide which sources it parks); a layout change is announced at once.
+static void split_refresh(struct fdr_mixer *m)
+{
+	if (!fdr_splitmix_refresh(m->split))
+		return;
+	pthread_mutex_lock(&m->mu);
+	announce(m);
 	pthread_mutex_unlock(&m->mu);
 }

@@ -9,6 +9,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "uplink.h"
+#include "split.h"
 #include "ws.h"
 #include "logring.h"
 
@@ -32,6 +33,7 @@
 #define FRAMES_PER_CHUNK (CHUNK_MS / FRAME_MS) // 25
 // MAX_STEMS bounds the wire format and arrays; the mixer sets the actual count.
 #define MAX_STEMS FDR_MAX_STEMS
+#define FDR_MAX_TICK_FRAMES 1024 // AUDIO_OUTPUT_FRAMES: the mixer pushes one OBS audio tick at a time
 // Every stem is stereo at the same bitrate, whatever it carries. Twitch serves ~160 kbps stereo
 // AAC-LC; 128 kbps stereo Opus is at least as good, and is the default. The hub can raise it
 // ({"type":"quality","kbps":N}) for channels whose plan includes more.
@@ -66,15 +68,42 @@ struct chunk {
 	uint32_t gen; // the stem layout it was encoded under
 };
 
+#define MAX_PENDING 8
+struct pending_layout {
+	int n, n_rest;
+	char names[MAX_STEMS][FDR_STEM_NAME_MAX];
+	char ids[MAX_STEMS][8];
+	enum fdr_platform platforms[MAX_STEMS];
+	uint64_t from; // the first frame (pushed count) in this layout
+	int map[MAX_STEMS]; // wire stem → this layout's stem carrying it, or -1 (silence)
+};
+
 struct fdr_uplink {
 	char *server;
 	char *key;
 
 	pthread_mutex_t mu; // guards rings, ws state, status
 	struct ring *rings[MAX_STEMS];
-	int n_stems; // stems on the wire, as the mixer set them (0 until it does)
+	// Every push writes every ring made so far (silence for a stem the layout doesn't have), so
+	// they all hold the same stretch of time: a layout change never moves one stem against another,
+	// or the stems against the chunks' clock (chunk N is played at N × 500 ms).
+	int n_rings;
+	uint64_t pushed;   // stereo frames pushed since the first layout (every ring alike)
+	uint64_t consumed; // stereo frames the worker has taken out of them
+	// The layouts the mixer switched to that the wire hasn't yet, each from the frame it starts at
+	// (oldest first). The wire changes layout only between chunks: until then a new layout's audio
+	// fills the chunk in progress, each stem from the new stem with the same name, platform and role.
+	struct pending_layout pending[MAX_PENDING];
+	int n_pending;
+	int n_push, push_rest; // the newest layout: stems the mixer pushes, rest stems among them
+	int n_stems; // stems on the wire (the chunk being encoded and the last list announced)
 	char names[MAX_STEMS][FDR_STEM_NAME_MAX];
 	bool rest_last; // the last stem is "Everything else"
+	// The split fader (PROTOCOL-SPLIT.md §2): each stem's platform, the split group's id, and how
+	// many "Everything else" stems end the list (2 while split: Twitch's, then YouTube's).
+	enum fdr_platform platforms[MAX_STEMS];
+	char fader_ids[MAX_STEMS][8];
+	int n_rest;
 
 	OpusEncoder *enc[MAX_STEMS];
 	int bitrate;      // what the encoders use (worker thread only)
@@ -164,13 +193,31 @@ static void ring_pop(struct ring *r, float *dst, size_t n)
 	r->len -= n;
 }
 
-// Locked. Drops buffered audio and the chunk in progress so every stem restarts aligned.
-static void reset_rings(struct fdr_uplink *u)
+// Locked. Which stem of `to` carries wire stem `s` (same role and name; the same platform, else
+// Twitch's or YouTube's for an untagged one and back), or -1.
+static int carrier(const struct fdr_uplink *u, int s, const struct pending_layout *to)
 {
-	for (int s = 0; s < MAX_STEMS; s++)
-		if (u->rings[s])
-			u->rings[s]->head = u->rings[s]->len = 0;
-	u->layout_gen++;
+	int best = -1, best_score = 0;
+	bool rest = s >= u->n_stems - u->n_rest;
+	for (int j = 0; j < to->n; j++) {
+		if ((j >= to->n - to->n_rest) != rest || astrcmpi(to->names[j], u->names[s]) != 0)
+			continue;
+		enum fdr_platform a = u->platforms[s], b = to->platforms[j];
+		int score = a == b ? 3 : (a == FDR_PLATFORM_TWITCH || b == FDR_PLATFORM_TWITCH) && (a == FDR_PLATFORM_ALL || b == FDR_PLATFORM_ALL) ? 2 : (a == FDR_PLATFORM_ALL || b == FDR_PLATFORM_ALL) ? 1 : 0;
+		if (score > best_score) {
+			best = j;
+			best_score = score;
+		}
+	}
+	return best;
+}
+
+// Locked. Each pending layout's stems for the wire's.
+static void map_pending(struct fdr_uplink *u)
+{
+	for (int p = 0; p < u->n_pending; p++)
+		for (int s = 0; s < u->n_stems; s++)
+			u->pending[p].map[s] = carrier(u, s, &u->pending[p]);
 }
 
 // The mixer hands over every stem for one tick at once, already aligned.
@@ -179,15 +226,20 @@ void fdr_uplink_push_tick(fdr_uplink_t *u, uint64_t ts, const float *const *stem
 	UNUSED_PARAMETER(ts);
 	if (!u)
 		return;
+	static float silence[FDR_MAX_TICK_FRAMES * CHANNELS];
 	pthread_mutex_lock(&u->mu);
-	if (n == u->n_stems && n > 0) {
-		for (int s = 0; s < n; s++)
-			if (u->rings[s])
-				ring_push(u->rings[s], stems[s], frames * CHANNELS);
+	if (u->n_push > 0 && n > 0 && frames <= FDR_MAX_TICK_FRAMES) {
+		// Every tick goes in, so the stems keep time. A tick in a layout just replaced (the mixer
+		// was changing) is put in as it is: its stems may be off for that tick, never its timing.
+		size_t over = u->rings[0] && u->rings[0]->len + frames * CHANNELS > RING_SAMPLES ? u->rings[0]->len + frames * CHANNELS - RING_SAMPLES : 0;
+		for (int s = 0; s < u->n_rings; s++)
+			ring_push(u->rings[s], s < n ? stems[s] : silence, frames * CHANNELS);
+		u->consumed += over / CHANNELS; // full rings drop their oldest audio (the worker is seconds behind)
+		u->pushed += frames;
 		if (u->watching_stream) {
 			if (track_peak > STREAM_SOUND_PEAK)
 				u->stream_heard_ns = os_gettime_ns();
-			for (int s = 0; s < n - (u->rest_last ? 1 : 0); s++)
+			for (int s = 0; s < n && s < n - u->push_rest; s++)
 				if (peak_of(stems[s], frames * CHANNELS) > STEM_SOUND_PEAK) {
 					u->stems_heard_ns = os_gettime_ns();
 					break;
@@ -241,6 +293,11 @@ static void send_status(struct fdr_uplink *u, uint64_t now)
 		}
 		dstr_cat(&msg, "\"");
 	}
+	if (send && u->status.split_track > 0) {
+		char split[256];
+		if (fdr_split_status_json(split, sizeof(split), u->status.split_track, u->status.split_warnings))
+			dstr_cat(&msg, split);
+	}
 	if (send)
 		dstr_cat(&msg, "}");
 	pthread_mutex_unlock(&u->mu);
@@ -263,30 +320,22 @@ static void send_stems(struct fdr_uplink *u)
 	bool send = u->stems_dirty && u->ws && u->connected;
 	int n = u->n_stems;
 	uint32_t gen = u->layout_gen;
-	bool rest_last = u->rest_last;
-	char names[MAX_STEMS][FDR_STEM_NAME_MAX];
+	struct fdr_stem_desc stems[MAX_STEMS];
+	char names[MAX_STEMS][FDR_STEM_NAME_MAX], ids[MAX_STEMS][8];
 	memcpy(names, u->names, sizeof(names));
+	memcpy(ids, u->fader_ids, sizeof(ids));
+	for (int s = 0; s < n; s++)
+		stems[s] = (struct fdr_stem_desc){names[s], s >= n - u->n_rest, ids[s][0] ? ids[s] : NULL, u->platforms[s]};
 	pthread_mutex_unlock(&u->mu);
 	if (!send || n < 1)
 		return;
+	// Without a split this is exactly the message from before it (test/split/stems-off.json).
+	char text[MAX_STEMS * (FDR_STEM_NAME_MAX * 2 + 96) + 64];
 	struct dstr msg = {0};
-	dstr_copy(&msg, "{\"type\":\"stems\",\"stems\":[");
-	for (int s = 0; s < n; s++) {
-		if (rest_last && s == n - 1) {
-			dstr_catf(&msg, "%s{\"id\":%d,\"name\":\"Everything else\",\"rest\":true}", s ? "," : "", s);
-			continue;
-		}
-		const char *name = names[s];
-		dstr_catf(&msg, "%s{\"id\":%d,\"name\":\"", s ? "," : "", s);
-		for (const char *c = name; *c; c++) { // JSON string: escape quotes and backslashes, drop controls
-			if (*c == '"' || *c == '\\')
-				dstr_catf(&msg, "\\%c", *c);
-			else if ((unsigned char)*c >= 0x20)
-				dstr_ncat(&msg, c, 1);
-		}
-		dstr_cat(&msg, "\"}");
-	}
-	dstr_cat(&msg, "]}");
+	if (fdr_stems_json(text, sizeof(text), stems, n))
+		dstr_copy(&msg, text);
+	else
+		return;
 	bool ok = fdr_ws_send_text(u->ws, msg.array);
 	dstr_free(&msg);
 	if (ok) {
@@ -334,7 +383,7 @@ static void on_text(void *param, const char *text)
 	if (!strcmp(text, "pong"))
 		return;
 	// The hub sends {"type":"listeners","n":N}, {"type":"update","latest":"X.Y.Z"},
-	// {"type":"quality","kbps":N,"maxStems":M} and {"type":"hello","channel":…,"plan":…,
+	// {"type":"quality","kbps":N,"maxStems":M,"splitMaxFaders":S} and {"type":"hello","channel":…,"plan":…,
 	// "limit":N,"twitch":bool,"youtube":bool}. Parsed as JSON so a value is never mistaken for a key.
 	obs_data_t *message = obs_data_create_from_json(text);
 	if (!message)
@@ -357,6 +406,13 @@ static void on_text(void *param, const char *text)
 		if (m > 0) {
 			u->max_stems = m > MAX_STEMS ? MAX_STEMS : (int)m;
 			u->status.max_stems = u->max_stems;
+		}
+		// The most faders with which a split fader is allowed at this quality (absent: no limit).
+		if (obs_data_has_user_value(message, "splitMaxFaders")) {
+			long long s = obs_data_get_int(message, "splitMaxFaders");
+			u->status.split_max_faders = s > 0 ? (s > MAX_STEMS ? MAX_STEMS : (int)s) : -1;
+		} else {
+			u->status.split_max_faders = 0;
 		}
 		pthread_mutex_unlock(&u->mu);
 	} else if (!strcmp(type, "hello")) {
@@ -527,10 +583,52 @@ static void finish_chunk(struct fdr_uplink *u)
 	memset(u->chunk_peak, 0, sizeof(u->chunk_peak));
 }
 
+// Locked, worker, between chunks: the layout of the audio at the next frame becomes the wire's
+// (announced before the first chunk in it). True if it changed.
+static bool switch_layout(struct fdr_uplink *u)
+{
+	int take = -1;
+	for (int p = 0; p < u->n_pending; p++)
+		if (u->pending[p].from <= u->consumed)
+			take = p;
+	if (take < 0)
+		return false;
+	const struct pending_layout *l = &u->pending[take];
+	// The wire's own layout again (a change undone within one chunk): nothing to announce.
+	bool same = l->n == u->n_stems && l->n_rest == u->n_rest;
+	for (int s = 0; s < l->n && same; s++)
+		same = !strcmp(l->names[s], u->names[s]) && !strcmp(l->ids[s], u->fader_ids[s]) && l->platforms[s] == u->platforms[s];
+	if (same) {
+		memmove(u->pending, u->pending + take + 1, sizeof(u->pending[0]) * (size_t)(u->n_pending - take - 1));
+		u->n_pending -= take + 1;
+		map_pending(u);
+		return false;
+	}
+	u->n_stems = l->n;
+	u->n_rest = l->n_rest;
+	u->rest_last = l->n_rest > 0;
+	for (int s = 0; s < l->n; s++) {
+		memcpy(u->names[s], l->names[s], sizeof(u->names[s]));
+		memcpy(u->fader_ids[s], l->ids[s], sizeof(u->fader_ids[s]));
+		u->platforms[s] = l->platforms[s];
+	}
+	u->status.stems = l->n;
+	u->status.split = false;
+	for (int s = 0; s < l->n; s++)
+		u->status.split = u->status.split || l->ids[s][0];
+	memmove(u->pending, u->pending + take + 1, sizeof(u->pending[0]) * (size_t)(u->n_pending - take - 1));
+	u->n_pending -= take + 1;
+	map_pending(u);
+	u->layout_gen++;
+	u->stems_dirty = true;
+	return true;
+}
+
 // Encode every complete 20 ms frame that all stems have.
 static void encode_ready(struct fdr_uplink *u)
 {
 	static float pcm[MAX_STEMS][FRAME_SAMPLES * CHANNELS];
+	static float in[MAX_STEMS][FRAME_SAMPLES * CHANNELS];
 	pthread_mutex_lock(&u->mu);
 	int want = u->want_bitrate;
 	pthread_mutex_unlock(&u->mu);
@@ -543,19 +641,52 @@ static void encode_ready(struct fdr_uplink *u)
 	}
 	for (;;) {
 		pthread_mutex_lock(&u->mu);
+		if (u->frames_in_chunk == 0) {
+			bool due = false;
+			for (int p = 0; p < u->n_pending; p++)
+				due = due || u->pending[p].from <= u->consumed;
+			if (due && u->n_stems > 0 && !u->stems_dirty) {
+				// The chunks already made go out under the list they were made with first.
+				pthread_mutex_unlock(&u->mu);
+				flush(u);
+				pthread_mutex_lock(&u->mu);
+			}
+			switch_layout(u);
+		}
 		int n_stems = u->n_stems;
 		uint32_t gen = u->layout_gen;
-		bool ready = n_stems > 0;
-		for (int s = 0; s < n_stems; s++)
-			ready = ready && u->rings[s] && u->rings[s]->len >= FRAME_SAMPLES * CHANNELS;
-		if (ready)
-			for (int s = 0; s < n_stems; s++)
-				ring_pop(u->rings[s], pcm[s], FRAME_SAMPLES * CHANNELS);
+		bool ready = n_stems > 0 && u->n_rings > 0 && u->rings[0]->len >= FRAME_SAMPLES * CHANNELS;
+		if (ready) {
+			for (int s = 0; s < u->n_rings; s++)
+				ring_pop(u->rings[s], in[s], FRAME_SAMPLES * CHANNELS);
+			// Each wire stem from the layout its audio was pushed in: frame by frame segments.
+			uint64_t at = u->consumed;
+			for (int i = 0; i < FRAME_SAMPLES;) {
+				int seg = -1;
+				uint64_t until = UINT64_MAX;
+				for (int p = 0; p < u->n_pending; p++) {
+					if (u->pending[p].from <= at + (uint64_t)i)
+						seg = p;
+					else if (u->pending[p].from < until)
+						until = u->pending[p].from;
+				}
+				int end = until - at < (uint64_t)FRAME_SAMPLES ? (int)(until - at) : FRAME_SAMPLES;
+				for (int s = 0; s < n_stems; s++) {
+					int src = seg < 0 ? s : u->pending[seg].map[s];
+					if (src >= 0 && src < u->n_rings)
+						memcpy(pcm[s] + i * CHANNELS, in[src] + i * CHANNELS, sizeof(float) * (size_t)(end - i) * CHANNELS);
+					else
+						memset(pcm[s] + i * CHANNELS, 0, sizeof(float) * (size_t)(end - i) * CHANNELS);
+				}
+				i = end;
+			}
+			u->consumed += FRAME_SAMPLES;
+		}
 		pthread_mutex_unlock(&u->mu);
 		if (!ready)
 			return;
 		if (u->chunk_gen != gen) {
-			// The stem list changed under a chunk in progress: drop it, a chunk has one layout.
+			// A chunk has one layout; layouts change only between chunks (switch_layout).
 			u->chunk_gen = gen;
 			u->chunk_stems = n_stems;
 			u->frames_in_chunk = 0;
@@ -633,12 +764,30 @@ fdr_uplink_t *fdr_uplink_start(const fdr_uplink_config *cfg)
 
 void fdr_uplink_set_stems(fdr_uplink_t *u, const char *const *names, int n, bool rest)
 {
+	struct fdr_stem_desc stems[MAX_STEMS];
+	if (n > MAX_STEMS)
+		n = MAX_STEMS;
+	for (int s = 0; s < n; s++)
+		stems[s] = (struct fdr_stem_desc){names[s], rest && s == n - 1, NULL, FDR_PLATFORM_ALL};
+	fdr_uplink_set_layout(u, stems, n);
+}
+
+void fdr_uplink_set_layout(fdr_uplink_t *u, const struct fdr_stem_desc *stems, int n)
+{
 	if (!u)
 		return;
 	if (n < 1)
 		n = 1;
 	if (n > MAX_STEMS)
 		n = MAX_STEMS;
+	// "Everything else" stems end the list: one, or two while split.
+	int n_rest = 0;
+	while (n_rest < n && stems[n - 1 - n_rest].rest)
+		n_rest++;
+	bool rest = n_rest > 0;
+	bool split = false;
+	for (int i = 0; i < n; i++)
+		split = split || (stems[i].fader && *stems[i].fader);
 	// Rings and encoders for new indices are made before the count grows, so the worker never
 	// sees an index it has no encoder for. They stay for the life of the uplink.
 	struct ring *new_rings[MAX_STEMS] = {0};
@@ -650,28 +799,77 @@ void fdr_uplink_set_stems(fdr_uplink_t *u, const char *const *names, int n, bool
 			new_enc[s] = make_encoder(u->bitrate);
 	}
 	pthread_mutex_lock(&u->mu);
-	bool changed = n != u->n_stems || rest != u->rest_last;
+	struct pending_layout next = {.n = n, .n_rest = n_rest, .from = u->pushed};
 	for (int s = 0; s < n; s++) {
-		if (new_rings[s])
-			u->rings[s] = new_rings[s];
-		if (new_enc[s])
-			u->enc[s] = new_enc[s];
-		char name[FDR_STEM_NAME_MAX];
-		snprintf(name, sizeof(name), "%s", names[s] ? names[s] : "");
-		changed = changed || strcmp(u->names[s], name) != 0;
-		memcpy(u->names[s], name, sizeof(name));
+		snprintf(next.names[s], sizeof(next.names[s]), "%s", stems[s].name ? stems[s].name : "");
+		snprintf(next.ids[s], sizeof(next.ids[s]), "%s", stems[s].fader ? stems[s].fader : "");
+		next.platforms[s] = stems[s].platform;
+	}
+	// The same list again (any settings change re-applies it) changes nothing.
+	bool changed;
+	if (u->n_pending) {
+		const struct pending_layout *last = &u->pending[u->n_pending - 1];
+		changed = last->n != n || last->n_rest != n_rest || memcmp(last->names, next.names, sizeof(next.names)) || memcmp(last->ids, next.ids, sizeof(next.ids)) ||
+			  memcmp(last->platforms, next.platforms, sizeof(next.platforms));
+	} else {
+		changed = u->n_stems != n || u->n_rest != n_rest;
+		for (int s = 0; s < n && !changed; s++)
+			changed = strcmp(u->names[s], next.names[s]) || strcmp(u->fader_ids[s], next.ids[s]) || u->platforms[s] != next.platforms[s];
 	}
 	if (changed) {
-		// The same list again (any settings change re-applies it) leaves the audio alone.
-		u->n_stems = n;
-		u->rest_last = rest;
-		u->status.stems = n;
-		u->stems_dirty = true;
-		reset_rings(u); // a chunk has one layout: restart aligned (and a new layout generation)
+		for (int s = 0; s < n; s++) {
+			if (new_rings[s] && !u->rings[s]) {
+				// A new ring starts with as much silence as the others hold, so it keeps their time.
+				static const float zero[1024] = {0};
+				size_t have = u->n_rings && u->rings[0] ? u->rings[0]->len : 0;
+				for (size_t done = 0; done < have; done += 1024)
+					ring_push(new_rings[s], zero, have - done < 1024 ? have - done : 1024);
+				u->rings[s] = new_rings[s];
+				new_rings[s] = NULL;
+			}
+			if (new_enc[s] && !u->enc[s]) {
+				u->enc[s] = new_enc[s];
+				new_enc[s] = NULL;
+			}
+		}
+		if (n > u->n_rings)
+			u->n_rings = n;
+		// Two changes with no audio between them: only the second one ever plays.
+		if (u->n_pending && u->pending[u->n_pending - 1].from == u->pushed)
+			u->n_pending--;
+		if (u->n_pending == MAX_PENDING)
+			u->n_pending--; // (eight changes within one chunk) the newest replaces the last
+		u->pending[u->n_pending++] = next;
+		map_pending(u);
+		u->n_push = n;
+		u->push_rest = n_rest;
 	}
 	pthread_mutex_unlock(&u->mu);
+	for (int s = 0; s < MAX_STEMS; s++) {
+		if (new_rings[s])
+			bfree(new_rings[s]);
+		if (new_enc[s])
+			opus_encoder_destroy(new_enc[s]);
+	}
 	if (changed)
-		fdr_log(LOG_INFO, "stems: %d layer(s)%s", n, rest ? " incl. Everything else" : "");
+		fdr_log(LOG_INFO, "stems: %d layer(s)%s%s", n, rest ? " incl. Everything else" : "", split ? ", one fader split per platform" : "");
+}
+
+void fdr_uplink_set_split_status(fdr_uplink_t *u, int youtube_track, unsigned warnings)
+{
+	if (!u)
+		return;
+	pthread_mutex_lock(&u->mu);
+	if (youtube_track < 0 || youtube_track > 6)
+		youtube_track = 0;
+	if (!youtube_track)
+		warnings = 0;
+	if (u->status.split_track != youtube_track || u->status.split_warnings != warnings) {
+		u->status.split_track = youtube_track;
+		u->status.split_warnings = warnings;
+		u->stream_status_dirty = true;
+	}
+	pthread_mutex_unlock(&u->mu);
 }
 
 void fdr_uplink_set_mismatch(fdr_uplink_t *u, const char *source_name)

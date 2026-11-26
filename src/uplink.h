@@ -15,6 +15,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "split.h"
 
 typedef struct fdr_uplink fdr_uplink_t;
 
@@ -50,6 +51,10 @@ typedef struct fdr_uplink_status {
 	int max_stems;             // layers the channel's plan allows (from the hub); 0 = not told
 	char mix_mismatch[64];     // a source sent to Faders but missing from the stream; "" = fine
 	char mix_duplicate[64];    // a source in the stream more than once (its fader carries one copy); "" = fine
+	bool split;                // the stems include a split fader (two more layers: PROTOCOL-SPLIT.md)
+	int split_track;           // while split: the OBS track that goes to YouTube; 0 = no split
+	unsigned split_warnings;   // while split: FDR_SPLIT_WARN_* bits, sent with the status
+	int split_max_faders;      // the hub's splitMaxFaders (split.h): 0 = not sent (no limit), < 0 = none allowed
 } fdr_uplink_status;
 
 fdr_uplink_t *fdr_uplink_start(const fdr_uplink_config *cfg);
@@ -67,6 +72,11 @@ void fdr_uplink_watch_stream_track(fdr_uplink_t *u, int track);
 // streamed track's peak for the silence check. set_mismatch: the mixer's oracle verdict (a
 // source name, or "" when fine), reported to the hub.
 void fdr_uplink_set_stems(fdr_uplink_t *u, const char *const *names, int n, bool rest);
+// The same with each stem's split metadata (src/split.h): set_stems is set_layout with no split.
+void fdr_uplink_set_layout(fdr_uplink_t *u, const struct fdr_stem_desc *stems, int n);
+// While split: the YouTube track and the warnings (FDR_SPLIT_WARN_*), sent in the status message as
+// "split" (PROTOCOL-SPLIT.md §3). youtube_track 0: no split, and no "split" in the status.
+void fdr_uplink_set_split_status(fdr_uplink_t *u, int youtube_track, unsigned warnings);
 void fdr_uplink_push_tick(fdr_uplink_t *u, uint64_t ts, const float *const *stems, int n, size_t frames, float track_peak);
 void fdr_uplink_set_mismatch(fdr_uplink_t *u, const char *source_name);
 // A source the oracle found in the stream more than once: shown in OBS, not sent to the hub.

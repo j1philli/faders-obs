@@ -47,7 +47,7 @@ static const struct fdr_report_fader faders[] = {
 static const struct fdr_report_source sources[] = {
 	{"Mic/Aux", "wasapi_input_capture", "Voice", "Voice", "ok", false, "none", 0x3, true},
 	{"Game Capture", "game_capture", "Game", "Game", "ok", false, "none", 0x5, true},
-	{"Spotify", "wasapi_process_output_capture", "Music", "Music", "ok", false, "none", 0x9, true},
+	{"Spotify", "wasapi_process_output_capture", "Music", "Music", "ok", false, "none", 0x5, true},
 	{"Discord", "wasapi_process_output_capture", "Discord", "Discord", "ok", false, "monitor and output", 0x3, true},
 	{"Alert Box (browser)", "browser_source", "Alerts", "", "locked", false, "none", 0x1, true},
 	{"Jordan's mic", "coreaudio_input_capture", "rest", "", "rest", true, "none", 0x0, false},
@@ -55,7 +55,9 @@ static const struct fdr_report_source sources[] = {
 	{"Say \"hi\" \\ now\tplease", "ffmpeg_source", "new", "", "new", false, "monitor only", 0x1, true},
 	{"Key test " STREAM_KEY, "ffmpeg_source", "Old fader", "", "deleted", false, "none", 0x1, true},
 	{"Música 🎵", "ffmpeg_source", "Music", "", "dropped", false, "none", 0x1, true},
+	{"YT Music", "browser_source", "Music", "Music", "ok", false, "none", 0x4, false},
 };
+#define N_SOURCES ((int)(sizeof(sources) / sizeof(*sources)))
 static const struct fdr_log_line log_lines[] = {
 	{1795988342, FDR_LOG_INFO, "loaded (version 0.4.0)", 1},
 	{1795988591, FDR_LOG_INFO, "uplink started → wss://hub.faders.tv/ingest", 2},
@@ -93,7 +95,7 @@ static struct fdr_report_input fixture(bool names)
 		.plugin_key_set = true,
 		.channel = "NightOwlPlays",
 		.plan = "pro",
-		.platforms = "twitch",
+		.platforms = "twitch,youtube",
 		.listener_limit = 50,
 		.max_stems = 5,
 		.running = true,
@@ -114,8 +116,10 @@ static struct fdr_report_input fixture(bool names)
 		.n_faders = 5,
 		.allowance = 4,
 		.sources = sources,
-		.n_sources = 10,
-		.audio_total = 10,
+		.n_sources = N_SOURCES,
+		.audio_total = N_SOURCES,
+		// Music has two sources, one per platform; Spotify is on YouTube's track too.
+		.split = {"Music", true, "on", "Spotify", "YT Music", 3, "twitch-source-on-youtube-track"},
 		.log = log_lines,
 		.n_log = 9,
 		.log_total = 9,
@@ -187,12 +191,47 @@ int main(int argc, char **argv)
 
 	// Names off: no source, fader or channel name anywhere: lists, problems, log lines, JSON.
 	char why[1024] = "";
-	const char *names[] = {"NightOwlPlays", "Voice", "Game", "Music", "Discord", "Alerts", "Old fader", "Mic/Aux", "Game Capture", "Spotify", "Alert Box", "Jordan", "Tip jar", "Say ", "Key test", "Música", "🎵"};
+	const char *names[] = {"NightOwlPlays", "Voice", "Game", "Music", "Discord", "Alerts", "Old fader", "Mic/Aux", "Game Capture", "Spotify", "Alert Box", "Jordan", "Tip jar", "Say ", "Key test", "Música", "🎵", "YT Music"};
 	for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++)
 		if (has(no_names, names[i]))
 			snprintf(why + strlen(why), sizeof(why) - strlen(why), "\"%s\" ", names[i]);
 	bool off_ok = r_off == 0 && !*why && has(no_names, "Source 1") && has(no_names, "Fader 1") && has(no_names, "[channel]") && !has(no_names, PLUGIN_KEY) && !has(no_names, STREAM_KEY);
 	result(off_ok, "names off: no name is left anywhere", "%s%s", *why ? "still there: " : "", why);
+
+	// The split: one line, and the same facts in the JSON, names on and off.
+	bool split_on = has(with_names, "- **Per-platform fader**: Music, on · Twitch: Spotify · YouTube: YT Music on Track 3 · Twitch source is also on the YouTube track") &&
+			has(with_names, "\"split\": {\"fader\": \"Music\", \"ticked\": true, \"on\": true, \"why\": \"on\", \"twitch_source\": \"Spotify\", \"youtube_source\": \"YT Music\", \"youtube_track\": 3, \"split_max_faders\": 0, \"warnings\": [\"twitch-source-on-youtube-track\"]}");
+	bool split_off_names = has(no_names, "- **Per-platform fader**: Fader 3, on · Twitch: Source 3 · YouTube: Source 11 on Track 3") &&
+			       has(no_names, "\"twitch_source\": \"Source 3\", \"youtube_source\": \"Source 11\"");
+	result(split_on && split_off_names, "split: one line and the JSON, names on and off", "names on %d, names off %d", split_on, split_off_names);
+	// Off (downgraded): why, and the YouTube source waits in Everything else.
+	struct fdr_report_source parked[N_SOURCES];
+	memcpy(parked, sources, sizeof(parked));
+	parked[N_SOURCES - 1].plays = "";
+	parked[N_SOURCES - 1].state = "parked";
+	struct fdr_report_input down = fixture(true);
+	down.plan = "free";
+	down.sources = parked;
+	down.split = (struct fdr_report_split){"Music", false, "plan", "Spotify", "YT Music", 3, ""};
+	char *down_report = NULL;
+	fdr_report_build(&down, &down_report);
+	result(has(down_report, "- **Per-platform fader**: Music, off (needs Pro or Partner) · Twitch: Spotify · YouTube: YT Music on Track 3\n") &&
+		       has(down_report, "YT Music (Music's YouTube source, until it's on)") && has(down_report, "\"on\": false, \"why\": \"plan\"") && !has(down_report, "**Music**: Spotify, YT Music"),
+	       "split off: why, and the YouTube source in Everything else", "%s", "");
+	free(down_report);
+	struct fdr_report_input q = fixture(true);
+	q.split = (struct fdr_report_split){"Music", false, "quality", "Spotify", "YT Music", 3, "", 2};
+	char *q_report = NULL;
+	fdr_report_build(&q, &q_report);
+	result(has(q_report, "Music, off (too many faders for two sources at this audio quality: max 2 with a split)") && has(q_report, "\"why\": \"quality\"") && has(q_report, "\"split_max_faders\": 2"),
+	       "split off for the hub's splitMaxFaders: why, and the max", "%s", "");
+	free(q_report);
+	struct fdr_report_input none = fixture(true);
+	none.split = (struct fdr_report_split){"", false, "none", "", "", 0, ""};
+	char *none_report = NULL;
+	fdr_report_build(&none, &none_report);
+	result(has(none_report, "- **Per-platform fader**: none\n") && has(none_report, "\"split\": {\"fader\": \"\", \"ticked\": false, \"on\": false, \"why\": \"none\""), "no split: says none", "%s", "");
+	free(none_report);
 
 	// The same snapshot gives the same bytes.
 	char *again = NULL;
@@ -202,7 +241,7 @@ int main(int argc, char **argv)
 
 	// Fail closed: a key in a field that isn't redacted (typed fields are copied as they are)
 	// would survive; the report is refused rather than shown.
-	struct fdr_report_source leaky[10];
+	struct fdr_report_source leaky[N_SOURCES];
 	memcpy(leaky, sources, sizeof(leaky));
 	leaky[1].kind = "x_" PLUGIN_KEY;
 	struct fdr_report_input bad = fixture(true);
@@ -213,8 +252,13 @@ int main(int argc, char **argv)
 	bad2.obs_version = "32.2.2-" STREAM_KEY;
 	char *refused2 = (char *)"untouched";
 	int r_bad2 = fdr_report_build(&bad2, &refused2);
-	result(r_bad != 0 && refused == NULL && r_bad2 != 0 && refused2 == NULL, "fails closed when a key would survive", "plugin key: %d %s; stream key: %d %s", r_bad, refused ? "TEXT RETURNED" : "no text", r_bad2,
-	       refused2 ? "TEXT RETURNED" : "no text");
+	// The split's warnings are typed (copied as they are): a key there is refused too.
+	struct fdr_report_input bad3 = fixture(true);
+	bad3.split.warnings = "x-" PLUGIN_KEY;
+	char *refused3 = (char *)"untouched";
+	int r_bad3 = fdr_report_build(&bad3, &refused3);
+	result(r_bad != 0 && refused == NULL && r_bad2 != 0 && refused2 == NULL && r_bad3 != 0 && refused3 == NULL, "fails closed when a key would survive", "plugin key: %d %s; stream key: %d %s; split warnings: %d %s",
+	       r_bad, refused ? "TEXT RETURNED" : "no text", r_bad2, refused2 ? "TEXT RETURNED" : "no text", r_bad3, refused3 ? "TEXT RETURNED" : "no text");
 
 	// Many sources: the list stops at 200 and says so; the report stays small.
 	static struct fdr_report_source many[1000];

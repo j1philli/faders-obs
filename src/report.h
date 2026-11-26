@@ -39,11 +39,24 @@ struct fdr_report_source {
 	const char *kind;       // OBS source id (typed)
 	const char *saved;      // "new", "rest", or the fader it was put on (free text)
 	const char *plays;      // the fader it plays on, "" = Everything else (free text)
-	const char *state;      // "new", "rest", "ok", "locked", "deleted", "dropped" (placement.h)
+	const char *state;      // "new", "rest", "ok", "locked", "deleted", "dropped" (placement.h), or on the
+	                        // split fader "parked" / "extra" (split.h): both play in Everything else
 	bool muted;
 	const char *monitoring; // "none", "monitor only", "monitor and output"
 	uint32_t tracks;        // OBS tracks it is ticked for (bit 0 = Track 1)
 	bool on_stream_track;   // ticked for the track OBS streams
+};
+
+// The split fader ("Two sources: one per platform", split.h).
+struct fdr_report_split {
+	const char *fader;          // free text: the fader it's ticked on, "" = none
+	bool on;                    // in effect now
+	const char *why;            // typed: split.c's fdr_split_why_name ("on", "plan", "no youtube", …)
+	const char *twitch_source;  // free text, "" = not picked
+	const char *youtube_source; // free text, "" = not picked
+	int youtube_track;          // 1-6, 0 = not picked
+	const char *warnings;       // typed: the wire's warning codes, ","-joined, "" = none
+	int max_faders;             // the hub's splitMaxFaders: 0 = no limit, < 0 = none allowed
 };
 
 struct fdr_report_input {
@@ -80,6 +93,7 @@ struct fdr_report_input {
 	const char *last_failure; // free text, "" if none
 	int rejected_status;
 	const char *mix_mismatch, *mix_duplicate; // source names (free text), "" if none
+	struct fdr_report_split split;
 
 	const struct fdr_report_fader *faders;
 	int n_faders;

@@ -20,7 +20,7 @@ set(GEN "${CMAKE_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${GEN}")
 file(WRITE "${GEN}/obsconfig.h" "#pragma once\n#define OBS_RELEASE_CANDIDATE 0\n#define OBS_BETA 0\n")
 
-set(FADERS_SOURCES src/plugin-main.c src/uplink.c src/mixer.c src/placement.c src/logring.c src/redact.c src/report.c src/sysinfo.c)
+set(FADERS_SOURCES src/plugin-main.c src/uplink.c src/mixer.c src/placement.c src/split.c src/splitmix.c src/logring.c src/redact.c src/report.c src/sysinfo.c)
 set(OBS_INCLUDES "${GEN}" "${OBS_SRC}/libobs" "${OBS_SRC}/frontend/api" "${SIMDE_INCLUDE}")
 
 if(APPLE)
@@ -152,8 +152,9 @@ add_dependencies(faders-mixtest faders)
 
 # The duplicate warning's three-window rule, tick by tick: src/mixer.c compiled into the test,
 # driven without an audio thread or a clock (test/oracle-streak.c).
-# src/mixer.c places through src/placement.c and logs through src/logring.c.
-add_executable(faders-oracle-streak test/oracle-streak.c src/placement.c src/logring.c)
+# src/mixer.c places through src/placement.c, parks a split fader's sources through src/split.c and
+# src/splitmix.c, and logs through src/logring.c.
+add_executable(faders-oracle-streak test/oracle-streak.c src/placement.c src/split.c src/splitmix.c src/logring.c)
 target_include_directories(faders-oracle-streak PRIVATE ${OBS_INCLUDES} "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(faders-oracle-streak PRIVATE Threads::Threads)
 target_compile_definitions(faders-oracle-streak PRIVATE FADERS_GRAPHICS_MODULE="${GRAPHICS_MODULE}")
@@ -167,6 +168,24 @@ else()
     target_compile_options(faders-oracle-streak PRIVATE ${MINGW_SHIM})
   endif()
 endif()
+
+# A stem layout change keeps every stem on the same timeline (test/uplink-timeline.c): the real
+# uplink compiled in, no thread, no clock, no network; chunks decoded with libopus.
+add_executable(faders-uplink-timeline test/uplink-timeline.c src/split.c src/placement.c src/logring.c)
+target_include_directories(faders-uplink-timeline PRIVATE ${OBS_INCLUDES} "${CMAKE_SOURCE_DIR}/src" "${OPUS_ROOT}/include")
+target_link_libraries(faders-uplink-timeline PRIVATE Threads::Threads)
+target_compile_definitions(faders-uplink-timeline PRIVATE FDR_VERSION_STR="${PROJECT_VERSION}")
+if(APPLE)
+  target_link_options(faders-uplink-timeline PRIVATE "-F${FRAMEWORKS}" "-Wl,-rpath,${FRAMEWORKS}")
+  target_link_libraries(faders-uplink-timeline PRIVATE "-framework libobs" "${OPUS_ROOT}/lib/libopus.a")
+else()
+  target_link_libraries(faders-uplink-timeline PRIVATE ${OBS_IMPORT_LIBS} "${OPUS_LIB}")
+  if(NOT MSVC)
+    target_link_options(faders-uplink-timeline PRIVATE -static-libgcc -static)
+    target_compile_options(faders-uplink-timeline PRIVATE ${MINGW_SHIM})
+  endif()
+endif()
+add_test(NAME uplink-timeline COMMAND faders-uplink-timeline)
 
 # Panel listing tests: "What's on each fader" when a fader has 2+ sources, one executable per
 # test/panel-listing-*.c (shared harness: test/panel-listing.h).
@@ -236,6 +255,38 @@ endif()
 add_dependencies(faders-placement faders)
 foreach(scenario model legacy duplicate validate capacity sharkey2 refresh cancel firstrun firstrun-placed)
   add_test(NAME placement-${scenario} COMMAND faders-placement ${scenario})
+endforeach()
+
+# The split fader ("Two sources: one per platform"), no OBS (src/split.c): who may tick it, what it
+# holds, when it is on, the track warnings, and the stems/status JSON against test/split/ goldens.
+add_executable(faders-split-unit test/split-unit.c)
+add_test(NAME split-unit COMMAND faders-split-unit "${CMAKE_SOURCE_DIR}/test/split")
+
+# The split fader through the real plugin: Tools → Faders' checkbox, lists, track and status lines,
+# gating by plan and platforms, save/load/duplicate, downgrade and upgrade (test/split.c, no hub).
+# And its mixing (test/split-mix.c), which needs a hub: run by test/split-mix.mjs.
+foreach(split_test faders-split faders-split-mix)
+  if(split_test STREQUAL "faders-split")
+    add_executable(${split_test} test/split.c)
+  else()
+    add_executable(${split_test} test/split-mix.c)
+  endif()
+  target_include_directories(${split_test} PRIVATE ${OBS_INCLUDES})
+  target_compile_definitions(${split_test} PRIVATE FADERS_PLUGIN_BIN="${PLUGIN_BIN}" FADERS_PLUGIN_DATA="${PLUGIN_DATA}" FADERS_GRAPHICS_MODULE="${GRAPHICS_MODULE}")
+  if(APPLE)
+    target_link_options(${split_test} PRIVATE "-F${FRAMEWORKS}" "-Wl,-rpath,${FRAMEWORKS}")
+    target_link_libraries(${split_test} PRIVATE "-framework libobs")
+  else()
+    target_link_libraries(${split_test} PRIVATE ${OBS_IMPORT_LIBS})
+    if(NOT MSVC)
+      target_link_options(${split_test} PRIVATE -static-libgcc -static)
+      target_compile_options(${split_test} PRIVATE ${MINGW_SHIM})
+    endif()
+  endif()
+  add_dependencies(${split_test} faders)
+endforeach()
+foreach(scenario window free noyoutube onlytwo roundtrip reload downgrade counts report quality)
+  add_test(NAME split-${scenario} COMMAND faders-split ${scenario})
 endforeach()
 
 # Debug report core, no OBS (src/redact.c, src/logring.c, src/report.c, src/sysinfo.c): the

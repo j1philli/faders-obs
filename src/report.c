@@ -325,6 +325,49 @@ static bool is_state(const struct fdr_report_source *s, const char *state)
 	return s->state && !strcmp(s->state, state);
 }
 
+static bool is_rest(const struct fdr_report_source *s)
+{
+	return is_state(s, "new") || is_state(s, "rest") || is_state(s, "deleted") || is_state(s, "parked") || is_state(s, "extra");
+}
+
+static const char *split_why(const char *why)
+{
+	if (!why || !*why || !strcmp(why, "none"))
+		return "its fader is gone";
+	if (!strcmp(why, "plan"))
+		return "needs Pro or Partner";
+	if (!strcmp(why, "no youtube"))
+		return "YouTube isn't connected";
+	if (!strcmp(why, "no twitch source"))
+		return "no Twitch source picked";
+	if (!strcmp(why, "no youtube source"))
+		return "no YouTube source picked";
+	if (!strcmp(why, "no track"))
+		return "no YouTube track picked";
+	if (!strcmp(why, "locked"))
+		return "its fader isn't in the plan";
+	if (!strcmp(why, "too many"))
+		return "too many faders";
+	return why;
+}
+
+// One warning code (split.c) in words, as Tools → Faders says it.
+static void split_warning(struct out *o, const char *code, size_t n, int stream_track, int youtube_track)
+{
+	if (n == 26 && !strncmp(code, "twitch-source-not-on-track", n))
+		out_fmt(o, "Twitch source isn't on Track %d", stream_track);
+	else if (n == 27 && !strncmp(code, "youtube-source-not-on-track", n))
+		out_fmt(o, "YouTube source isn't on Track %d", youtube_track);
+	else if (n == 30 && !strncmp(code, "twitch-source-on-youtube-track", n))
+		out_str(o, "Twitch source is also on the YouTube track: YouTube viewers will hear it twice");
+	else if (n == 30 && !strncmp(code, "youtube-source-on-twitch-track", n))
+		out_str(o, "YouTube source is also on the Twitch track: Twitch viewers will hear it twice");
+	else if (n == 20 && !strncmp(code, "youtube-track-silent", n))
+		out_fmt(o, "Track %d, picked for YouTube, is silent", youtube_track);
+	else
+		out_fmt(o, "%.*s", (int)n, code);
+}
+
 int fdr_report_build(const struct fdr_report_input *in, char **result)
 {
 	*result = NULL;
@@ -375,6 +418,11 @@ int fdr_report_build(const struct fdr_report_input *in, char **result)
 	char *failure = text(&c, in->last_failure);
 	char *mismatch = source_text(&c, in->mix_mismatch);
 	char *duplicate = source_text(&c, in->mix_duplicate);
+	const struct fdr_report_split *sp = &in->split;
+	char *split_fader = fader_text(&c, sp->fader);
+	char *split_tw = source_text(&c, sp->twitch_source);
+	char *split_yt = source_text(&c, sp->youtube_source);
+	bool split_ticked = sp->fader && *sp->fader;
 	char *config_dir = text(&c, in->config_dir);
 	char *module_dir = text(&c, in->module_dir);
 	for (int i = 0; i < in->n_log; i++)
@@ -507,6 +555,35 @@ int fdr_report_build(const struct fdr_report_input *in, char **result)
 		}
 		out_str(&o, *sep ? "\n" : "none\n");
 	}
+	out_str(&o, "- **Per-platform fader**: ");
+	if (!split_ticked) {
+		out_str(&o, "none\n");
+	} else {
+		out_text(&o, split_fader);
+		if (sp->on)
+			out_str(&o, ", on");
+		else if (sp->why && !strcmp(sp->why, "quality") && sp->max_faders > 0)
+			out_fmt(&o, ", off (too many faders for two sources at this audio quality: max %d with a split)", sp->max_faders);
+		else if (sp->why && !strcmp(sp->why, "quality"))
+			out_str(&o, ", off (no split at this audio quality)");
+		else
+			out_fmt(&o, ", off (%s)", split_why(sp->why));
+		out_str(&o, " · Twitch: ");
+		out_text(&o, *split_tw ? split_tw : "not picked");
+		out_str(&o, " · YouTube: ");
+		out_text(&o, *split_yt ? split_yt : "not picked");
+		if (sp->youtube_track)
+			out_fmt(&o, " on Track %d", sp->youtube_track);
+		else
+			out_str(&o, ", no track picked");
+		for (const char *w = sp->warnings ? sp->warnings : ""; *w;) {
+			size_t n = strcspn(w, ",");
+			out_str(&o, " · ");
+			split_warning(&o, w, n, track, sp->youtube_track);
+			w += n + (w[n] == ',');
+		}
+		out_str(&o, "\n");
+	}
 
 	// ── Faders ──
 	out_str(&o, "\n**Faders**");
@@ -527,19 +604,23 @@ int fdr_report_build(const struct fdr_report_input *in, char **result)
 			out_text(&o, src[i]);
 			if (is_state(s, "dropped"))
 				out_str(&o, " (dropped for this stream)");
+			else if (split_ticked && !strcmp(sp->fader, in->faders[f].name) && sp->twitch_source && !strcmp(s->name, sp->twitch_source))
+				out_str(&o, " (Twitch)");
+			else if (split_ticked && !strcmp(sp->fader, in->faders[f].name) && sp->youtube_source && !strcmp(s->name, sp->youtube_source))
+				out_str(&o, " (YouTube)");
 		}
 		out_str(&o, k ? "\n" : "nothing\n");
 	}
 	{
 		int k = 0, rest = 0;
 		for (int i = 0; i < ns; i++)
-			rest += is_state(&in->sources[i], "new") || is_state(&in->sources[i], "rest") || is_state(&in->sources[i], "deleted");
+			rest += is_rest(&in->sources[i]);
 		out_fmt(&o, "- **Everything else**: %d source%s", rest, rest == 1 ? "" : "s");
 		if (n_new)
 			out_fmt(&o, ", %d new", n_new);
 		for (int i = 0; i < ns && k < FDR_REPORT_MAX_NAMED; i++) {
 			const struct fdr_report_source *s = &in->sources[i];
-			if (!is_state(s, "new") && !is_state(s, "rest") && !is_state(s, "deleted"))
+			if (!is_rest(s))
 				continue;
 			out_str(&o, k++ ? ", " : " — ");
 			out_text(&o, src[i]);
@@ -549,6 +630,14 @@ int fdr_report_build(const struct fdr_report_input *in, char **result)
 				out_str(&o, " (its fader \"");
 				out_text(&o, saved[i]);
 				out_str(&o, "\" is gone)");
+			} else if (is_state(s, "parked")) {
+				out_str(&o, " (");
+				out_text(&o, saved[i]);
+				out_str(&o, "'s YouTube source, until it's on)");
+			} else if (is_state(s, "extra")) {
+				out_str(&o, " (");
+				out_text(&o, saved[i]);
+				out_str(&o, " takes one source per platform)");
 			}
 		}
 		if (rest > k)
@@ -647,7 +736,24 @@ int fdr_report_build(const struct fdr_report_input *in, char **result)
 	out_json(&o, mismatch);
 	out_str(&o, ", \"mix_duplicate\": ");
 	out_json(&o, duplicate);
-	out_str(&o, "},\n \"faders\": [");
+	out_str(&o, "},\n \"split\": {\"fader\": ");
+	out_json(&o, split_fader);
+	out_fmt(&o, ", \"ticked\": %s, \"on\": %s, \"why\": ", split_ticked ? "true" : "false", sp->on ? "true" : "false");
+	out_json(&o, sp->why && *sp->why ? sp->why : "none");
+	out_str(&o, ", \"twitch_source\": ");
+	out_json(&o, split_tw);
+	out_str(&o, ", \"youtube_source\": ");
+	out_json(&o, split_yt);
+	out_fmt(&o, ", \"youtube_track\": %d, \"split_max_faders\": %d, \"warnings\": [", sp->youtube_track, sp->max_faders);
+	for (const char *w = sp->warnings ? sp->warnings : "", *sep = ""; *w; sep = ", ") {
+		size_t n = strcspn(w, ",");
+		char one[64];
+		snprintf(one, sizeof(one), "%.*s", (int)(n < sizeof(one) ? n : sizeof(one) - 1), w);
+		out_str(&o, sep);
+		out_json(&o, one);
+		w += n + (w[n] == ',');
+	}
+	out_str(&o, "]},\n \"faders\": [");
 	for (int f = 0; f < nf; f++) {
 		out_str(&o, f ? ",\n  {\"name\": " : "\n  {\"name\": ");
 		out_json(&o, fader[f]);
@@ -729,6 +835,9 @@ int fdr_report_build(const struct fdr_report_input *in, char **result)
 	free(failure);
 	free(mismatch);
 	free(duplicate);
+	free(split_fader);
+	free(split_tw);
+	free(split_yt);
 	free(config_dir);
 	free(module_dir);
 	free(c.names.a);

@@ -1,0 +1,1 @@
+{"type":"stems","stems":[{"id":0,"name":"Voice"},{"id":1,"name":"Game"},{"id":2,"name":"Music","fader":"f2","platform":"twitch"},{"id":3,"name":"Music","fader":"f2","platform":"youtube"},{"id":4,"name":"Everything else","rest":true,"platform":"twitch"},{"id":5,"name":"Everything else","rest":true,"platform":"youtube"}]}
