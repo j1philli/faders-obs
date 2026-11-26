@@ -25,8 +25,9 @@
 
 typedef struct fdr_mixer fdr_mixer_t;
 
-// Private setting on an audio source: which fader it belongs to, by name. "" = Everything else;
-// absent = automatic (FDR_AUTO: the rule table decides, see fdr_mixer_auto_fader).
+// Private setting on an audio source: which fader it belongs to, by name. "" = placed in
+// Everything else; absent = NEW: never placed, it plays in Everything else (see placement.h).
+// Nothing is ever placed for the streamer: not by kind of source, not by OBS track.
 #define FDR_FADER_SETTING "faders_fader"
 // Test hook (private setting, bool): include the source even if the gate says no. Used to
 // inject a mismatch and watch the oracle drop it.
@@ -46,12 +47,6 @@ void fdr_mixer_set_transition_duration(fdr_mixer_t *m, int duration_ms);
 // Fader names in id order (≤ FDR_MAX_FADERS, ≤ FDR_STEM_NAME_MAX chars each) and the plan's
 // allowance: faders past max_stems are folded into Everything else, never dropped.
 void fdr_mixer_set_faders(fdr_mixer_t *m, const char *const *names, int n, int max_stems);
-// OBS tracks as fader inputs: faders[t] is the fader for Track t+1 (a name, "" for Everything
-// else, NULL = the track isn't used). Every source ticked for the track plays on that fader (the
-// streamed track is never one). Nothing is de-duplicated: a source that is also on a fader of its
-// own, or ticked for another assigned track, plays on each. Ticking or unticking a track in OBS is
-// followed within a moment.
-void fdr_mixer_set_track_faders(fdr_mixer_t *m, const char *const faders[6]);
 // Re-read the sources and their assignments (after a change the mixer didn't see itself).
 void fdr_mixer_rebuild(fdr_mixer_t *m);
 // Fader names as configured, how many are on the wire (the rest folded), and the mismatch.
@@ -59,12 +54,12 @@ int fdr_mixer_fader_count(fdr_mixer_t *m);
 int fdr_mixer_faders_on_wire(fdr_mixer_t *m);
 const char *fdr_mixer_fader_name(fdr_mixer_t *m, int i);
 
-// The rule table's pick for a source ("Voice", "Game", "Music", "Discord", "Alerts") or NULL
-// for Everything else. What the "Auto" choice in the settings resolves to.
-const char *fdr_mixer_auto_fader(obs_source_t *src);
 // The fader a source is in right now, given the configured names (NULL = Everything else).
 const char *fdr_mixer_effective_fader(fdr_mixer_t *m, obs_source_t *src);
-// Set a source's assignment (fader name, "" for Everything else, NULL for auto) and rebuild.
+// Whether the oracle dropped this source for the stream (it then plays in Everything else).
+bool fdr_mixer_is_dropped(fdr_mixer_t *m, obs_source_t *src);
+// Set a source's saved placement (fader name, "" for Everything else, NULL for NEW) and rebuild.
+// Unchecked: callers check the move first (fdr_place_check).
 void fdr_mixer_assign(fdr_mixer_t *m, obs_source_t *src, const char *fader);
 
 // Test hook: JSON with the window's residual/fader levels, callback timing and gate decisions;

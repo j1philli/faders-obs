@@ -24,7 +24,6 @@ static int check(const char *scenario, int expected_game_inputs)
 	proc_handler_call(obs_get_proc_handler(), "faders_dialog", &cd);
 	const char *rows = calldata_string(&cd, "rows");
 	int mic = 0, cable = 0, game_inputs = 0;
-	bool track_offered = rows && strstr(rows, "OBS Track 6 (everything ticked for it)");
 	bool voice = false;
 	for (const char *line = rows; line && *line;) {
 		const char *end = strchr(line, '\n');
@@ -44,9 +43,9 @@ static int check(const char *scenario, int expected_game_inputs)
 		line = end + 1;
 	}
 	calldata_free(&cd);
-	bool ok = mic == 1 && cable == 1 && game_inputs == expected_game_inputs && track_offered;
-	printf("%s  %s: Voice rows mic=%d cable=%d (want 1 each), other inputs=%d/%d, track 6 offered=%d\n",
-	       ok ? "PASS" : "FAIL", scenario, mic, cable, game_inputs, expected_game_inputs, track_offered);
+	bool ok = mic == 1 && cable == 1 && game_inputs == expected_game_inputs;
+	printf("%s  %s: Voice rows mic=%d cable=%d (want 1 each), other inputs=%d/%d\n",
+	       ok ? "PASS" : "FAIL", scenario, mic, cable, game_inputs, expected_game_inputs);
 	return !ok;
 }
 

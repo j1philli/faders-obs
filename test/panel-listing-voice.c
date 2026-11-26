@@ -18,8 +18,10 @@ int main(void)
 	if (!settings_source)
 		return 1;
 
-	// Voice has exactly two sources: a mic it gets by kind, and a virtual cable put on it.
+	// Voice has exactly two sources: a mic and a virtual cable, both put on it (nothing is placed
+	// by kind).
 	obs_source_t *mic = cable("Mic", "{0.0.1.00000000}.{6f1c0a3e-0000-4000-8000-000000000001}");
+	place(mic, "Voice");
 	obs_source_t *other = cable("Discord cable", "{0.0.1.00000000}.{6f1c0a3e-0000-4000-8000-000000000002}");
 	place(other, "Game");
 	obs_source_t *music = cable("Music (VB-Cable)", "{0.0.1.00000000}.{6f1c0a3e-0000-4000-8000-000000000003}");

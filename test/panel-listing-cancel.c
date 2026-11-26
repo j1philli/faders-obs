@@ -23,8 +23,9 @@ int main(void)
 	if (!settings_source)
 		return 1;
 
-	// Voice has two sources (the mic by kind, a music cable put on it), Game one.
+	// Voice has two sources (a mic and a music cable, both put on it), Game one.
 	obs_source_t *mic = cable("Mic", "{0.0.1.00000000}.{6f1c0a3e-0000-4000-8000-000000000001}");
+	place(mic, "Voice");
 	obs_source_t *other = cable("Discord cable", "{0.0.1.00000000}.{6f1c0a3e-0000-4000-8000-000000000002}");
 	place(other, "Game");
 	obs_source_t *music = cable("Music (VB-Cable)", "{0.0.1.00000000}.{6f1c0a3e-0000-4000-8000-000000000003}");
