@@ -760,8 +760,9 @@ int main(int argc, char **argv)
 	obs_source_set_audio_mixers(twin_b, 1);
 	assign("twin-a", "Voice");
 	obs_sceneitem_t *twin_a_item = obs_scene_add(many, twin_a), *twin_b_item = obs_scene_add(many, twin_b);
-	// Three windows in a row (1.5 to 2 s) from the last time the source list was rebuilt, and
-	// adding two sources can rebuild it more than once: wait for the warning, not a fixed time.
+	// Three windows in a row (1.5 to 2 s) once both play. Rebuilding the source list meanwhile
+	// keeps the count (test/oracle-streak.c), but windows where the two copies reach the mix far
+	// enough apart take r under 0.5 and start it over: wait for the warning, not a fixed time.
 	// It normally comes within a few seconds, but on a busy CI agent (TeamCity #6508) the run of
 	// windows can take longer than the old 8 s, so poll against a wall-clock deadline well past
 	// that. The warning is sticky (withdrawn only after ORACLE_CALM quiet windows), so the checks

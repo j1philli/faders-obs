@@ -33,6 +33,8 @@ ctest --test-dir build -R panel-enumeration --output-on-failure
 ctest --test-dir build -R '^placement-' --output-on-failure || { echo "##teamcity[buildProblem description='faders-placement: a source was placed wrongly']"; exit 1; }
 # Debug report: redaction table, log ring, golden reports, fail closed (no hub, never uploaded).
 ctest --test-dir build -R '^debug-' --output-on-failure || { echo "##teamcity[buildProblem description='debug report: a redaction, log ring or report check failed']"; exit 1; }
+# The duplicate warning's three-window rule, tick by tick (test/oracle-streak.c: no audio thread, no clock).
+ctest --test-dir build -R oracle-streak --output-on-failure
 
 # libobs behaviour the virtual mixer relies on (PROTOCOL.md "Virtual mixer"): every check must pass.
 build/faders-mixcheck > mixcheck.log 2>&1 || { grep -E "^(PASS|FAIL|SKIP)" mixcheck.log; echo "##teamcity[buildProblem description='faders-mixcheck: a libobs mixer assumption failed']"; exit 1; }
