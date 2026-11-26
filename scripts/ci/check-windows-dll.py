@@ -27,7 +27,9 @@ for name in ("obs", "obs-frontend-api", "w32-pthreads"):
     missing = sorted(used - available)
     print(f"{name}.dll: {len(used)} symbols used, missing: {missing or 'none'}")
     if missing: problems.append(f"{name}.dll lacks {missing}")
-allowed = {"kernel32.dll", "winhttp.dll", "obs.dll", "obs-frontend-api.dll", "w32-pthreads.dll"}
+# advapi32: Windows's registry API (the debug report reads the OS display version and CPU name); a
+# system DLL on every Windows, like kernel32 and winhttp.
+allowed = {"kernel32.dll", "advapi32.dll", "winhttp.dll", "obs.dll", "obs-frontend-api.dll", "w32-pthreads.dll"}
 extra = sorted(d for d in imports if d not in allowed and not d.startswith("api-ms-win-crt-") and d != "msvcrt.dll")
 if extra: problems.append(f"unexpected DLL dependencies (would need shipping): {extra}")
 print("exports:", ", ".join(exports))
