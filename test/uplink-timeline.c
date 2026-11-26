@@ -247,14 +247,14 @@ static void check_hub_view(uint32_t seq0, const char *stem_a, const char *stem_b
 }
 
 // Where a stem's bursts land relative to where they were played (samples; the codec's delay
-// included): the last one before layout `change` (stem `was`, in any earlier list), the first one in
-// it (stem `is`).
-static bool offsets(const char *was, const char *is, int change, int64_t *before, int64_t *after)
+// included): the last one of stem `was` before the change at sample `at`, the first one of stem
+// `is` after it (the list may rename a stem: a split stem says its platform).
+static bool offsets(const char *was, const char *is, int64_t at, int64_t *before, int64_t *after)
 {
 	bool b = false, a = false;
 	for (int i = 0; i < n_bursts; i++) {
-		bool old = bursts[i].layout < change && !strcmp(bursts[i].stem, was);
-		bool now = bursts[i].layout == change && !strcmp(bursts[i].stem, is);
+		bool old = bursts[i].onset < at && !strcmp(bursts[i].stem, was);
+		bool now = bursts[i].onset >= at && !strcmp(bursts[i].stem, is);
 		if (!old && !now)
 			continue;
 		int64_t played = (bursts[i].onset - BURST_AT + PERIOD / 2) / PERIOD * PERIOD + BURST_AT;
@@ -280,12 +280,16 @@ int main(void)
 	const enum fdr_platform split_p[] = {FDR_PLATFORM_ALL, FDR_PLATFORM_TWITCH, FDR_PLATFORM_YOUTUBE, FDR_PLATFORM_TWITCH, FDR_PLATFORM_YOUTUBE};
 	const char *const folded[] = {"Voice", "Everything else"};
 
+	int64_t at[4];
 	layout(u, plain, NULL, 3);
 	run(u, 3, 6.3); // ends mid-chunk (6.3 s is 12.6 chunks)
+	at[1] = (int64_t)pos;
 	layout(u, split, split_p, 5); // split on
 	run(u, 5, 6.17);
+	at[2] = (int64_t)pos;
 	layout(u, plain, NULL, 3); // split off (a downgrade)
 	run(u, 3, 6.41);
+	at[3] = (int64_t)pos;
 	layout(u, folded, NULL, 2); // the plan's allowance: Music folds into Everything else
 	run(u, 2, 0.05);
 	layout(u, plain, NULL, 3); // and back, 50 ms later (a hello and a quality message together)
@@ -307,18 +311,20 @@ int main(void)
 		{2, "split off (5 → 3)", "Voice", "Voice"},
 		{2, "split off (5 → 3)", "Everything else@twitch", "Everything else"},
 		// The allowance step lasts 50 ms (no burst of its own): measured across both changes.
-		{4, "allowance 3 → 2 and back 50 ms later", "Voice", "Voice"},
-		{4, "allowance 3 → 2 and back 50 ms later", "Everything else", "Everything else"},
+		// A layout that lasts less than a chunk never reaches the wire (its audio fills the chunk
+		// in progress through the layout around it).
+		{3, "allowance 3 → 2 and back 50 ms later", "Voice", "Voice"},
+		{3, "allowance 3 → 2 and back 50 ms later", "Everything else", "Everything else"},
 	};
 	for (size_t c = 0; c < sizeof(cases) / sizeof(*cases); c++) {
 		int64_t before = 0, after = 0;
-		bool have = offsets(cases[c].was, cases[c].is, cases[c].change, &before, &after);
+		bool have = offsets(cases[c].was, cases[c].is, at[cases[c].change], &before, &after);
 		char name[128];
 		snprintf(name, sizeof(name), "%s: %s keeps its timeline", cases[c].what, cases[c].is);
 		result(have && llabs(after - before) < FRAME_SAMPLES, name, "burst offset %lld → %lld samples (%+.1f ms; want within one 20 ms frame)%s", (long long)before, (long long)after,
 		       (after - before) * 1000.0 / SAMPLE_RATE, have ? "" : ", no burst found on both sides");
 	}
-	result(changes == 4, "every layout change reached the hub", "%d stem list(s) after the first (want 4)", changes);
+	result(changes == 2, "the hub gets each layout that lasted (split on, split off)", "%d stem list(s) after the first (want 2: the 50 ms one never reaches the wire)", changes);
 	printf("%s\n", fails ? "FAILED" : "ALL PASSED");
 	return fails ? 1 : 0;
 }

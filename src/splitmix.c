@@ -127,6 +127,9 @@ fdr_splitmix_t *fdr_splitmix_create(fdr_uplink_t *uplink, int stream_track)
 }
 
 static void on_youtube(void *param, size_t mix_idx, struct audio_data *data);
+static void finalize_pending(struct fdr_splitmix *s, bool have_yt);
+static int take_release(struct fdr_splitmix *s, obs_source_t *out[2]);
+static void release_all(obs_source_t *const *list, int n);
 
 static void tap(struct fdr_splitmix *s, int track)
 {
@@ -143,10 +146,17 @@ static void tap(struct fdr_splitmix *s, int track)
 		fdr_log(LOG_INFO, "per-platform fader: YouTube's track no longer followed");
 	s->tapped = track;
 	pthread_mutex_lock(&s->mu);
+	// A tick waiting for YouTube's track goes out without it: every tick reaches the uplink, or
+	// the stems would drift against the chunks' clock.
+	if (s->pending && s->wire_index >= 0)
+		finalize_pending(s, false);
 	s->tap_track = track;
 	s->have_yt = false;
 	s->pending = false;
+	obs_source_t *rel[2];
+	int n_rel = take_release(s, rel);
 	pthread_mutex_unlock(&s->mu);
+	release_all(rel, n_rel);
 }
 
 void fdr_splitmix_destroy(fdr_splitmix_t *s)
@@ -309,6 +319,11 @@ bool fdr_splitmix_announce(fdr_splitmix_t *s, const char *const *names, int n_wi
 	if (!s)
 		return false;
 	pthread_mutex_lock(&s->mu);
+	// A tick waiting for YouTube's track goes out in the layout it was made in, before this one.
+	if (s->pending && s->wire_index >= 0)
+		finalize_pending(s, false);
+	obs_source_t *rel[2];
+	int n_rel = take_release(s, rel);
 	if (n_wire > FDR_MAX_FADERS)
 		n_wire = FDR_MAX_FADERS;
 	for (int i = 0; i < n_wire; i++)
@@ -325,6 +340,7 @@ bool fdr_splitmix_announce(fdr_splitmix_t *s, const char *const *names, int n_wi
 	if (split < 0) {
 		s->layout_n = n_wire + 1;
 		pthread_mutex_unlock(&s->mu);
+		release_all(rel, n_rel);
 		fdr_uplink_set_split_status(s->uplink, 0, 0);
 		return false;
 	}
@@ -336,6 +352,7 @@ bool fdr_splitmix_announce(fdr_splitmix_t *s, const char *const *names, int n_wi
 	fdr_uplink_set_layout(s->uplink, stems, s->layout_n);
 	s->last_poll_ns = 0; // the status follows at once
 	pthread_mutex_unlock(&s->mu);
+	release_all(rel, n_rel);
 	return true;
 }
 
@@ -423,7 +440,7 @@ static void finalize(struct fdr_splitmix *s, uint64_t ts, const float *const *st
 	// EE@youtube (the sum stays exact; the fader just doesn't hold it for those ticks).
 	memset(fyt, 0, sizeof(fyt));
 	bool inc = false;
-	obs_source_t *src = s->yt ? obs_weak_source_get_source(s->yt) : NULL;
+	obs_source_t *src = s->yt && s->tap_track ? obs_weak_source_get_source(s->yt) : NULL;
 	if (src) {
 		uint64_t ats = obs_source_get_audio_timestamp(src);
 		bool active = obs_source_active(src);
@@ -602,12 +619,22 @@ bool fdr_splitmix_tick(fdr_splitmix_t *s, uint64_t ts, const float *const *stems
 	if (!s)
 		return false;
 	pthread_mutex_lock(&s->mu);
-	if (s->wire_index < 0 || n + FDR_SPLIT_EXTRA != s->layout_n || s->wire_index >= n - 1 || !s->tap_track) {
-		bool split = s->wire_index >= 0;
+	if (s->wire_index < 0 || n + FDR_SPLIT_EXTRA != s->layout_n || s->wire_index >= n - 1) {
 		pthread_mutex_unlock(&s->mu);
-		// The split's layout is announced but this tick isn't in it (the layout is changing):
-		// pushing today's would be dropped by the uplink anyway.
-		return split;
+		// No split, or this tick isn't in its layout (the layout is changing): the mixer pushes it
+		// as it is. Every tick reaches the uplink, so the stems keep their time.
+		return false;
+	}
+	if (!s->tap_track) {
+		// YouTube's tap is being changed: this tick goes out without YouTube's track.
+		if (s->pending)
+			finalize_pending(s, false);
+		finalize(s, ts, stems, n, trk_l, trk_r, track_peak, fading, hold, false);
+		obs_source_t *rel[2];
+		int n_rel = take_release(s, rel);
+		pthread_mutex_unlock(&s->mu);
+		release_all(rel, n_rel);
+		return true;
 	}
 	// A tick still waiting means YouTube's track never came for it: send it without.
 	if (s->pending)

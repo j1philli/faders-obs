@@ -234,8 +234,12 @@ static bool wait_split(bool on)
 {
 	for (int i = 0; i < 150; i++) {
 		fetch();
-		if (flag("on") == on && num("stems") > 0)
+		if (flag("on") == on && num("stems") > 0) {
+			// The wire takes a new layout at its next chunk (≤ 500 ms): give it one.
+			pump_for(700);
+			fetch();
 			return true;
+		}
 		pump_for(100);
 	}
 	return false;
