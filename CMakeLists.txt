@@ -219,6 +219,38 @@ foreach(scenario model legacy duplicate validate capacity sharkey2 refresh cance
   add_test(NAME placement-${scenario} COMMAND faders-placement ${scenario})
 endforeach()
 
+# The split fader ("Two sources: one per platform"), no OBS (src/split.c): who may tick it, what it
+# holds, when it is on, the track warnings, and the stems/status JSON against test/split/ goldens.
+add_executable(faders-split-unit test/split-unit.c)
+add_test(NAME split-unit COMMAND faders-split-unit "${CMAKE_SOURCE_DIR}/test/split")
+
+# The split fader through the real plugin: Tools → Faders' checkbox, lists, track and status lines,
+# gating by plan and platforms, save/load/duplicate, downgrade and upgrade (test/split.c, no hub).
+# And its mixing (test/split-mix.c), which needs a hub: run by test/split-mix.mjs.
+foreach(split_test faders-split faders-split-mix)
+  if(split_test STREQUAL "faders-split")
+    add_executable(${split_test} test/split.c)
+  else()
+    add_executable(${split_test} test/split-mix.c)
+  endif()
+  target_include_directories(${split_test} PRIVATE ${OBS_INCLUDES})
+  target_compile_definitions(${split_test} PRIVATE FADERS_PLUGIN_BIN="${PLUGIN_BIN}" FADERS_PLUGIN_DATA="${PLUGIN_DATA}" FADERS_GRAPHICS_MODULE="${GRAPHICS_MODULE}")
+  if(APPLE)
+    target_link_options(${split_test} PRIVATE "-F${FRAMEWORKS}" "-Wl,-rpath,${FRAMEWORKS}")
+    target_link_libraries(${split_test} PRIVATE "-framework libobs")
+  else()
+    target_link_libraries(${split_test} PRIVATE ${OBS_IMPORT_LIBS})
+    if(NOT MSVC)
+      target_link_options(${split_test} PRIVATE -static-libgcc -static)
+      target_compile_options(${split_test} PRIVATE ${MINGW_SHIM})
+    endif()
+  endif()
+  add_dependencies(${split_test} faders)
+endforeach()
+foreach(scenario window free noyoutube onlytwo roundtrip reload downgrade counts)
+  add_test(NAME split-${scenario} COMMAND faders-split ${scenario})
+endforeach()
+
 # Debug report core, no OBS (src/redact.c, src/logring.c, src/report.c, src/sysinfo.c): the
 # redaction table, the log ring under concurrent writers, the report against golden files.
 find_package(Threads REQUIRED)
