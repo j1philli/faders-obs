@@ -19,8 +19,12 @@
 //   cap      the hub allows 2 faders: Voice and the split Music are both on the wire (5 layers)
 //   quality  the hub's splitMaxFaders 2 with 3 faders: no split
 //   nosplit  no split fader: today's layers and no second tap
+//   unsaved  Tools → Faders open while the hub's hello, plan change and update notice arrive: OBS
+//            must see no unsaved change (it compares the settings' JSON with a copy taken when the
+//            window opened, OBSBasicProperties::CheckSettings); a real edit still is one
 #include <obs.h>
 #include <obs-module.h>
+#include <obs-frontend-api.h>
 #include <util/platform.h>
 #include <util/dstr.h>
 #include <callback/calldata.h>
@@ -445,6 +449,109 @@ static void run_quality(const char *server, const char *key)
 	obs_source_release(game);
 }
 
+static bool find_settings(void *param, obs_source_t *s)
+{
+	if (strcmp(obs_source_get_id(s), "faders_uplink") != 0)
+		return true;
+	*(obs_source_t **)param = obs_source_get_ref(s);
+	return false;
+}
+// The settings as OBS's properties window compares them: their JSON (user values only).
+static char *settings_json(obs_source_t *src)
+{
+	obs_data_t *s = obs_source_get_settings(src);
+	char *json = bstrdup(obs_data_get_json(s));
+	obs_data_release(s);
+	return json;
+}
+static bool status_has(const char *text)
+{
+	calldata_t cd = {0};
+	call("faders_status", &cd);
+	bool has = calldata_string(&cd, "status") && strstr(calldata_string(&cd, "status"), text);
+	calldata_free(&cd);
+	return has;
+}
+
+static void run_unsaved(const char *server, const char *key, const char *config_dir)
+{
+	obs_source_t *voice = tone("voice", 440, 0.5, 1);
+	obs_set_output_source(1, voice);
+	obs_source_t *settings = NULL;
+	obs_enum_all_sources(find_settings, &settings);
+	// Set up while offline ("Only connect while I'm live"), then the window opens.
+	calldata_t cd = {0};
+	calldata_set_string(&cd, "server", server);
+	calldata_set_string(&cd, "key", key);
+	calldata_set_string(&cd, "faders", "Voice,Game,Music");
+	calldata_set_bool(&cd, "only_live", true);
+	call("faders_configure", &cd);
+	calldata_free(&cd);
+	pump_for(500);
+	char *opened = settings_json(settings);
+
+	// Go live: the hub's hello (Pro, Twitch and YouTube), quality and update notice arrive.
+	calldata_t ev = {0};
+	calldata_set_int(&ev, "event", OBS_FRONTEND_EVENT_STREAMING_STARTED);
+	call("faders_frontend_event", &ev);
+	calldata_free(&ev);
+	bool connected = false;
+	for (int i = 0; i < 100 && !connected; i++) {
+		pump_for(100);
+		connected = status_has("Connected as");
+	}
+	pump_for(3000); // the window refreshes from the graphics tick (at most every 2 s)
+	char *now = settings_json(settings);
+	result(connected && !strcmp(now, opened), "unsaved 1 the hub's hello and update: no unsaved change", "connected %d; settings %s", connected,
+	       !strcmp(now, opened) ? "unchanged" : now);
+	bfree(now);
+
+	// A plan change mid-stream (the hub's fresh hello).
+	printf("STEP hello-free\n");
+	fflush(stdout);
+	bool free_seen = false;
+	for (int i = 0; i < 100 && !free_seen; i++) {
+		pump_for(100);
+		free_seen = status_has("Free plan");
+	}
+	pump_for(3000);
+	now = settings_json(settings);
+	result(free_seen && !strcmp(now, opened), "unsaved 2 a plan change: no unsaved change", "Free shown %d; settings %s", free_seen, !strcmp(now, opened) ? "unchanged" : now);
+	bfree(now);
+
+	// It is still remembered for the window while offline (settings.json on disk).
+	char path[1024];
+	snprintf(path, sizeof(path), "%s/faders/settings.json", config_dir);
+	char *file = os_quick_read_utf8_file(path);
+	if (file) { // compare without the spaces a pretty-printed file has
+		char *w = file;
+		for (char *r = file; *r; r++)
+			if (*r != ' ' && *r != '\n' && *r != '\t')
+				*w++ = *r;
+		*w = 0;
+	}
+	bool kept = file && strstr(file, "\"account_plan\":\"free\"") && strstr(file, "\"account\":\"split_unsaved\"") && strstr(file, "\"update_available\":\"9.9.9\"");
+	result(kept, "unsaved 3 the account and the update notice are still saved", "%s", kept ? "settings.json has them" : file ? file : "(no settings.json)");
+	bfree(file);
+
+	// A real edit is an unsaved change, as before.
+	obs_data_t *edit = obs_data_create();
+	obs_data_set_bool(edit, "only_live", false);
+	obs_source_update(settings, edit);
+	obs_data_release(edit);
+	pump_for(300);
+	now = settings_json(settings);
+	result(strcmp(now, opened) != 0, "unsaved 4 a real edit is still an unsaved change", "settings %s", strcmp(now, opened) ? "changed" : "UNCHANGED");
+	bfree(now);
+	bfree(opened);
+	printf("STEP done\n");
+	fflush(stdout);
+	pump_for(300);
+	obs_set_output_source(1, NULL);
+	obs_source_release(voice);
+	obs_source_release(settings);
+}
+
 static void run_nosplit(const char *server, const char *key)
 {
 	obs_source_t *voice = tone("voice", 440, 0.5, 1), *game = tone("game", 660, 0.4, 1), *music = tone("music", 880, 0.3, 1);
@@ -504,6 +611,8 @@ int main(int argc, char **argv)
 		run_cap(argv[1], argv[2]);
 	else if (!strcmp(argv[3], "quality"))
 		run_quality(argv[1], argv[2]);
+	else if (!strcmp(argv[3], "unsaved"))
+		run_unsaved(argv[1], argv[2], config_dir);
 	else
 		run_nosplit(argv[1], argv[2]);
 	obs_wait_for_destroy_queue();

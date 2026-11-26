@@ -8,6 +8,7 @@
 //   cap      maxStems 2 counts the split fader once (and splitMaxFaders 2 allows it)
 //   quality  splitMaxFaders 2 with 3 faders: today's stems message, byte for byte
 //   nosplit  no split fader: today's stems message, byte for byte, and no split in the status
+//   unsaved  the hub's hello / plan change / update leave Tools → Faders with no unsaved change
 // Run after building: node test/split-mix.mjs [split|cap|nosplit ...]
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -72,7 +73,7 @@ async function run(mode, port, hubArgs, onStep) {
   await once(hub, "exit");
 }
 
-const modes = process.argv.slice(2).length ? process.argv.slice(2) : ["split", "cap", "quality", "nosplit"];
+const modes = process.argv.slice(2).length ? process.argv.slice(2) : ["split", "cap", "quality", "nosplit", "unsaved"];
 const pro = ["--plan", "pro", "--youtube", "--kbps", "128"];
 const splitOn = '{"type":"stems","stems":[{"id":0,"name":"Voice"},{"id":1,"name":"Music","fader":"f1","platform":"twitch"},{"id":2,"name":"Music","fader":"f1","platform":"youtube"},{"id":3,"name":"Everything else","rest":true,"platform":"twitch"},{"id":4,"name":"Everything else","rest":true,"platform":"youtube"}]}';
 const splitOff = '{"type":"stems","stems":[{"id":0,"name":"Voice"},{"id":1,"name":"Music"},{"id":2,"name":"Everything else","rest":true}]}';
@@ -133,6 +134,11 @@ if (modes.includes("nosplit"))
       const status = messages(hub, channel).filter((t) => t.startsWith('{"type":"status"'));
       check(status.length > 0 && status.every((s) => !s.includes('"split"')), "nosplit: no split object in the status", status.join(" | "));
     }
+  });
+
+if (modes.includes("unsaved"))
+  await run("unsaved", basePort + 4, [...pro, "--update", "9.9.9"], async (step, { channel, port }) => {
+    if (step === "hello-free") await hello(port, channel, "free", true);
   });
 
 console.log(failures ? "FAILED" : "ALL PASSED");
