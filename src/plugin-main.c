@@ -27,6 +27,8 @@
 #include "uplink.h"
 #include "mixer.h"
 #include "placement.h"
+#include "split.h"
+#include "splitmix.h"
 #include "logring.h"
 #include "report.h"
 #include "sysinfo.h"
@@ -194,6 +196,9 @@ static void apply_faders(obs_data_t *s)
 	const char *ptrs[FDR_MAX_FADERS];
 	for (int i = 0; i < n; i++)
 		ptrs[i] = names[i];
+	// The split fader (split.h) first: set_faders rebuilds, which applies it.
+	int track = (int)obs_data_get_int(s, FDR_SPLIT_TRACK_KEY);
+	fdr_splitmix_set(fdr_mixer_split(mixer), obs_data_get_string(s, FDR_SPLIT_FADER_KEY), track);
 	fdr_mixer_set_faders(mixer, ptrs, n, max_stems_seen);
 }
 
@@ -578,8 +583,8 @@ static void describe_status(obs_data_t *s, const fdr_uplink_status *st, struct s
 	const char *plan = plan_label(st->plan);
 	if (plan)
 		dstr_catf(&v->meta, "%s plan", plan);
-	if (st->stems > 0)
-		dstr_catf(&v->meta, "%s%d faders + Everything else", v->meta.len ? " · " : "", st->stems - 1);
+	if (st->stems > 0) // a split fader is one fader with two more layers
+		dstr_catf(&v->meta, "%s%d faders + Everything else", v->meta.len ? " · " : "", st->stems - (st->split ? 1 + FDR_SPLIT_EXTRA : 1));
 	if (st->platforms[0])
 		dstr_catf(&v->meta, "%s%s", v->meta.len ? " · " : "",
 			  !strcmp(st->platforms, "twitch,youtube") ? "Twitch and YouTube" : !strcmp(st->platforms, "youtube") ? "YouTube" : "Twitch");
@@ -682,6 +687,8 @@ static uint64_t status_fingerprint(const fdr_uplink_status *st)
 	MIX(st->stems);
 	MIX(st->max_stems);
 	MIX(st->listener_limit);
+	MIX(st->split);
+	MIX(st->split_warnings);
 	MIX(streaming);
 	MIX(mixer_unavailable);
 	for (const char *p = st->mix_mismatch; *p; p++)
@@ -691,6 +698,8 @@ static uint64_t status_fingerprint(const fdr_uplink_status *st)
 	for (const char *p = st->channel; *p; p++)
 		MIX(*p);
 	for (const char *p = st->plan; *p; p++)
+		MIX(*p);
+	for (const char *p = st->platforms; *p; p++)
 		MIX(*p);
 #undef MIX
 	return h;
@@ -775,10 +784,12 @@ static void refresh_window(void *unused)
 	const char *tail = key_tail(obs_data_get_string(s, "key"));
 	if (st.connected && st.channel[0] &&
 	    (strcmp(obs_data_get_string(s, "account"), st.channel) != 0 || strcmp(obs_data_get_string(s, "account_key"), tail) != 0 ||
-	     (st.max_stems > 0 && obs_data_get_int(s, "account_faders") != st.max_stems) || strcmp(obs_data_get_string(s, "account_plan"), st.plan) != 0)) {
+	     (st.max_stems > 0 && obs_data_get_int(s, "account_faders") != st.max_stems) || strcmp(obs_data_get_string(s, "account_plan"), st.plan) != 0 ||
+	     strcmp(obs_data_get_string(s, "account_platforms"), st.platforms) != 0)) {
 		obs_data_set_string(s, "account", st.channel);
 		obs_data_set_string(s, "account_key", tail);
 		obs_data_set_string(s, "account_plan", st.plan);
+		obs_data_set_string(s, "account_platforms", st.platforms);
 		if (st.max_stems > 0)
 			obs_data_set_int(s, "account_faders", st.max_stems);
 		save_settings(s);
@@ -850,6 +861,9 @@ static void src_defaults(obs_data_t *s)
 	obs_data_array_t *arr = names_array(defaults, 3);
 	obs_data_set_default_array(s, S_FADERS, arr);
 	obs_data_array_release(arr);
+	// No split fader, no YouTube track until the streamer picks one (split.h).
+	obs_data_set_default_string(s, FDR_SPLIT_FADER_KEY, "");
+	obs_data_set_default_int(s, FDR_SPLIT_TRACK_KEY, 0);
 }
 
 // ── The dialog: one block per fader, with a dropdown for each source on it ─────────────
@@ -866,9 +880,13 @@ static void src_defaults(obs_data_t *s)
 #define ADD_PREFIX "add:" // "add:<fader index>": the "Add a source…" dropdown
 #define ITEM_SRC "s:"     // dropdown values: "s:<source uuid>"
 #define CHOICE_REMOVE "~remove"
+#define SPLIT_PREFIX "split:"     // "split:<fader index>": "Two sources: one per platform"
+#define TWITCH_PREFIX "twitch:"   // "twitch:<fader index>": the split fader's Twitch source
+#define YOUTUBE_PREFIX "youtube:" // "youtube:<fader index>": its YouTube source
+#define CHOICE_NONE "~none"
 // Every input the mixer can route, plus one add row per fader.
 #define MAX_ITEMS FDR_MAX_AUDIO_SOURCES
-#define MAX_DIALOG_ROWS (MAX_ITEMS + FDR_MAX_FADERS)
+#define MAX_DIALOG_ROWS (MAX_ITEMS + 3 * FDR_MAX_FADERS)
 
 struct dialog_item {
 	char id[80];
@@ -877,8 +895,10 @@ struct dialog_item {
 	char saved_name[FDR_STEM_NAME_MAX]; // the fader it was put on (also when that is gone)
 	enum fdr_state state;
 	int fader; // index of the fader it has a row under (on it, or locked on it), or -1
+	enum fdr_split_role role; // on the split fader: which part it plays (split.h)
 };
 
+struct split_view;
 struct dialog_model {
 	char names[FDR_MAX_FADERS][FDR_STEM_NAME_MAX];
 	int n;
@@ -889,12 +909,16 @@ struct dialog_model {
 	int n_unmixed;        // audio inputs past what the mixer takes
 	struct dstr unmixed;  // their names, ", "-joined (HTML)
 	obs_data_t *settings;
+	const struct split_view *split; // the split fader as it is now
+	int tw_item, yt_item;           // its chosen sources' items, or -1
 };
 
+enum row_kind { ROW_SOURCE, ROW_ADD, ROW_SPLIT, ROW_TWITCH, ROW_YOUTUBE };
 struct dialog_row {
 	char key[24];
 	char fader[FDR_STEM_NAME_MAX];
-	char item[80]; // "" for an add dropdown
+	char item[80]; // "" for an add dropdown or an empty pick; "1"/"0" for the split checkbox
+	enum row_kind kind;
 };
 static struct dialog_row dialog_rows[MAX_DIALOG_ROWS];
 static int n_dialog_rows;
@@ -954,6 +978,122 @@ static int effective_placement(const struct fader_set *f, obs_source_t *s, enum 
 	return fdr_place_effective(&f->list, *saved, name, dropped, state);
 }
 
+
+// ── The split fader (split.h): the account, its sources, whether it is on ───────────────
+
+// The account the window goes by: the hub's hello in this connection, else as remembered for
+// this key (so it can be set up while offline).
+struct account_view {
+	char plan[24];
+	struct fdr_account a;
+};
+static void known_account(obs_data_t *settings, const fdr_uplink_status *st, struct account_view *v)
+{
+	bool live = st->plan[0] != 0;
+	bool remembered = !strcmp(obs_data_get_string(settings, "account_key"), key_tail(obs_data_get_string(settings, "key")));
+	const char *plan = live ? st->plan : remembered ? obs_data_get_string(settings, "account_plan") : "";
+	const char *platforms = live ? st->platforms : remembered ? obs_data_get_string(settings, "account_platforms") : "";
+	snprintf(v->plan, sizeof(v->plan), "%s", plan);
+	v->a = (struct fdr_account){v->plan, strstr(platforms, "twitch") != NULL, strstr(platforms, "youtube") != NULL};
+}
+
+static enum fdr_platform platform_of(obs_source_t *s)
+{
+	obs_data_t *priv = obs_source_get_private_settings(s);
+	enum fdr_platform p = fdr_platform_parse(obs_data_get_string(priv, FDR_PLATFORM_SETTING));
+	obs_data_release(priv);
+	return p;
+}
+// Locked by the caller as a placement change: the source's platform tag (ALL erases it).
+static void set_platform(obs_source_t *s, enum fdr_platform p)
+{
+	obs_data_t *priv = obs_source_get_private_settings(s);
+	if (p == FDR_PLATFORM_ALL)
+		obs_data_erase(priv, FDR_PLATFORM_SETTING);
+	else
+		obs_data_set_string(priv, FDR_PLATFORM_SETTING, fdr_platform_name(p));
+	obs_data_release(priv);
+}
+
+// The split fader's sources: the first audio input of each platform saved on `fader` (as the
+// mixer picks them, splitmix.c), and how many sources are saved on it in all.
+struct split_sources {
+	const char *fader;
+	obs_source_t *tw, *yt; // references
+	int on_fader;
+	obs_source_t *only; // the one source on it (when on_fader == 1)
+};
+static bool find_split_cb(void *param, obs_source_t *s)
+{
+	struct split_sources *f = param;
+	if (!is_audio_input(s))
+		return true;
+	char name[FDR_STEM_NAME_MAX];
+	if (saved_placement(s, name) != FDR_SAVED_FADER || astrcmpi(name, f->fader) != 0)
+		return true;
+	f->on_fader++;
+	f->only = s;
+	enum fdr_platform p = platform_of(s);
+	if (p == FDR_PLATFORM_TWITCH && !f->tw)
+		f->tw = obs_source_get_ref(s);
+	else if (p == FDR_PLATFORM_YOUTUBE && !f->yt)
+		f->yt = obs_source_get_ref(s);
+	return true;
+}
+static void find_split_sources(const char *fader, struct split_sources *out)
+{
+	memset(out, 0, sizeof(*out));
+	out->fader = fader;
+	if (fader && *fader)
+		obs_enum_sources(find_split_cb, out);
+	if (out->on_fader != 1)
+		out->only = NULL;
+}
+
+// Everything the window and the procedures need to know about the split, now.
+struct split_view {
+	struct account_view acc;
+	struct fader_set faders;
+	char fader[FDR_STEM_NAME_MAX]; // saved, "" = none (or not one of the faders any more)
+	int index;                     // its index, -1 = none
+	int track;                     // YouTube's track, 0 = not picked
+	struct split_sources src;
+	struct fdr_split_state state;
+	int stream_track; // Twitch's
+};
+static void split_view_get(obs_data_t *settings, struct split_view *v)
+{
+	fdr_uplink_status st;
+	get_status(&st);
+	known_account(settings, &st, &v->acc);
+	current_faders(settings, &v->faders);
+	v->index = fdr_place_find(&v->faders.list, obs_data_get_string(settings, FDR_SPLIT_FADER_KEY));
+	snprintf(v->fader, sizeof(v->fader), "%s", v->index >= 0 ? v->faders.names[v->index] : "");
+	int t = (int)obs_data_get_int(settings, FDR_SPLIT_TRACK_KEY);
+	v->track = t >= 1 && t <= 6 ? t : 0;
+	find_split_sources(v->fader, &v->src);
+	struct fdr_split_input in = {&v->faders.list, v->fader, v->track, v->acc.a, v->src.tw != NULL, v->src.yt != NULL};
+	fdr_split_evaluate(&in, &v->state);
+	int stream = stream_audio_track();
+	v->stream_track = stream ? stream : 1;
+}
+static void split_view_free(struct split_view *v)
+{
+	obs_source_release(v->src.tw);
+	obs_source_release(v->src.yt);
+	v->src.tw = v->src.yt = NULL;
+}
+// What a source does on the split fader (split.h): FDR_SPLIT_ROLE_NONE when it isn't on it.
+static enum fdr_split_role split_role_of(const struct split_view *v, obs_source_t *s)
+{
+	char name[FDR_STEM_NAME_MAX];
+	if (!v->fader[0] || saved_placement(s, name) != FDR_SAVED_FADER)
+		return FDR_SPLIT_ROLE_NONE;
+	enum fdr_platform p = platform_of(s);
+	bool chosen = (p == FDR_PLATFORM_TWITCH && s == v->src.tw) || (p == FDR_PLATFORM_YOUTUBE && s == v->src.yt);
+	return fdr_split_role(&v->state, v->fader, name, p, chosen);
+}
+
 // A name cut to fit a label, between characters, never inside one (OBS would show a broken
 // character at the end of the row).
 static void cut_label(char *label, size_t size, const char *name)
@@ -1002,14 +1142,25 @@ static bool add_dialog_source(void *param, obs_source_t *s)
 		it->fader = fdr_place_find(&l, it->saved_name);
 	if (it->state == FDR_STATE_NEW)
 		m->n_new++;
+	// The split fader shows its two sources in its own lists; the YouTube source while the
+	// split is off, and anything else saved on it, play in Everything else.
+	it->role = m->split ? split_role_of(m->split, s) : FDR_SPLIT_ROLE_NONE;
+	if (it->role == FDR_SPLIT_ROLE_PARKED || it->role == FDR_SPLIT_ROLE_EXTRA)
+		it->fader = -1;
+	if (m->split && s == m->split->src.tw)
+		m->tw_item = m->n_items - 1;
+	if (m->split && s == m->split->src.yt)
+		m->yt_item = m->n_items - 1;
 	return true;
 }
 
-static void build_dialog_model(struct dialog_model *m, obs_data_t *settings, int allowance)
+static void build_dialog_model(struct dialog_model *m, obs_data_t *settings, int allowance, const struct split_view *split)
 {
 	dstr_free(&m->unmixed);
 	memset(m, 0, sizeof(*m));
 	m->settings = settings;
+	m->split = split;
+	m->tw_item = m->yt_item = -1;
 	m->n = fader_names(settings, m->names, FDR_MAX_FADERS);
 	m->open = allowance > 0 && allowance < m->n ? allowance : m->n;
 	obs_enum_sources(add_dialog_source, m);
@@ -1028,6 +1179,7 @@ static void add_dialog_row(obs_properties_t *group, struct dialog_model *m, int 
 		snprintf(row->key, sizeof(row->key), ADD_PREFIX "%d", fader);
 	snprintf(row->fader, sizeof(row->fader), "%s", m->names[fader]);
 	snprintf(row->item, sizeof(row->item), "%s", current ? current->id : "");
+	row->kind = current ? ROW_SOURCE : ROW_ADD;
 	n_dialog_rows++;
 	bool locked = fader >= m->open;
 	// The fader's name sits on the left of its first row only.
@@ -1040,7 +1192,7 @@ static void add_dialog_row(obs_properties_t *group, struct dialog_model *m, int 
 		obs_property_list_add_string(p, locked ? "Not in your plan: plays in Everything else" : "Add a source…", "");
 	for (int i = 0; !current && !locked && i < m->n_items; i++) {
 		const struct dialog_item *it = &m->items[i];
-		if (it->fader >= 0) // already has a row on a fader
+		if (it->fader >= 0 || it->role == FDR_SPLIT_ROLE_PARKED) // on a fader (or kept for the split fader)
 			continue;
 		char text[sizeof(it->label) + 8];
 		snprintf(text, sizeof(text), "%s%s", it->label, it->state == FDR_STATE_NEW ? " (new)" : "");
@@ -1055,10 +1207,156 @@ static void add_dialog_row(obs_properties_t *group, struct dialog_model *m, int 
 	obs_data_unset_user_value(m->settings, row->key);
 }
 
+
+static struct dialog_row *new_row(enum row_kind kind, const char *prefix, int fader, const char *name, const char *item)
+{
+	if (n_dialog_rows >= MAX_DIALOG_ROWS)
+		return NULL;
+	struct dialog_row *row = &dialog_rows[n_dialog_rows++];
+	snprintf(row->key, sizeof(row->key), "%s%d", prefix, fader);
+	snprintf(row->fader, sizeof(row->fader), "%s", name);
+	snprintf(row->item, sizeof(row->item), "%s", item);
+	row->kind = kind;
+	return row;
+}
+
+// "Two sources: one per platform" under a fader: ticked on the split fader; on the others, only
+// while no fader has it, the plan is Pro or Partner and YouTube is connected (split.h).
+static void add_split_checkbox(obs_properties_t *group, struct dialog_model *m, int fader)
+{
+	const struct split_view *v = m->split;
+	bool is_split = v->index == fader;
+	struct dialog_row *row = new_row(ROW_SPLIT, SPLIT_PREFIX, fader, m->names[fader], is_split ? "1" : "0");
+	if (!row)
+		return;
+	enum fdr_split_gate g = fdr_split_gate(&v->acc.a, &v->faders.list, v->fader, m->names[fader]);
+	char label[160];
+	if (is_split || g == FDR_SPLIT_GATE_OK)
+		snprintf(label, sizeof(label), "Two sources: one per platform");
+	else
+		snprintf(label, sizeof(label), "Two sources: one per platform (%s)", fdr_split_gate_text(g));
+	obs_property_t *p = obs_properties_add_bool(group, row->key, label);
+	obs_property_set_long_description(p, "One source for Twitch and one for YouTube, for example different music on each. Viewers get a slider for each. Counts as 1 fader.");
+	// The split fader's own box can always be unticked (also after a downgrade).
+	obs_property_set_enabled(p, is_split || g == FDR_SPLIT_GATE_OK);
+	obs_data_set_default_bool(m->settings, row->key, is_split);
+	obs_data_unset_user_value(m->settings, row->key);
+}
+
+// One of the split fader's two source lists: (none), the source it has, and every source that
+// isn't on a fader (NEW ones marked).
+static void add_split_list(obs_properties_t *group, struct dialog_model *m, int fader, enum fdr_platform platform)
+{
+	bool tw = platform == FDR_PLATFORM_TWITCH;
+	int cur = tw ? m->tw_item : m->yt_item, other = tw ? m->yt_item : m->tw_item;
+	const struct dialog_item *current = cur >= 0 ? &m->items[cur] : NULL;
+	struct dialog_row *row = new_row(tw ? ROW_TWITCH : ROW_YOUTUBE, tw ? TWITCH_PREFIX : YOUTUBE_PREFIX, fader, m->names[fader], current ? current->id : "");
+	if (!row)
+		return;
+	char label[FDR_STEM_NAME_MAX + 32];
+	snprintf(label, sizeof(label), "%s · %s source", m->names[fader], tw ? "Twitch" : "YouTube");
+	obs_property_t *p = obs_properties_add_list(group, row->key, label, OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	obs_property_set_long_description(p, tw ? "What Twitch viewers hear on this fader: the source in your Twitch stream's audio."
+						: "What YouTube viewers hear on this fader: the source on the OBS track that goes to YouTube.");
+	if (current)
+		obs_property_list_add_string(p, current->label, current->id);
+	obs_property_list_add_string(p, "(none)", current ? CHOICE_NONE : "");
+	for (int i = 0; i < m->n_items; i++) {
+		const struct dialog_item *it = &m->items[i];
+		if (i == cur || i == other || it->fader >= 0 || it->role == FDR_SPLIT_ROLE_PARKED)
+			continue;
+		char text[sizeof(it->label) + 8];
+		snprintf(text, sizeof(text), "%s%s", it->label, it->state == FDR_STATE_NEW ? " (new)" : "");
+		obs_property_list_add_string(p, text, it->id);
+	}
+	obs_data_set_default_string(m->settings, row->key, row->item);
+	obs_data_unset_user_value(m->settings, row->key);
+}
+
+// The split fader's block: its two lists, YouTube's track, the box, what it counts as and what
+// still needs doing, and the track checks per platform.
+static void add_split_block(obs_properties_t *group, struct dialog_model *m, int fader)
+{
+	const struct split_view *v = m->split;
+	add_split_list(group, m, fader, FDR_PLATFORM_TWITCH);
+	add_split_list(group, m, fader, FDR_PLATFORM_YOUTUBE);
+	obs_property_t *t = obs_properties_add_list(group, FDR_SPLIT_TRACK_KEY, "Which OBS track goes to YouTube?", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_set_long_description(t, "The track your YouTube output sends, for example the one obs-multi-rtmp or Aitum uses for YouTube. Twitch keeps the track OBS streams.");
+	obs_property_list_add_int(t, "Pick a track", 0);
+	for (int i = 1; i <= 6; i++) {
+		char name[16];
+		snprintf(name, sizeof(name), "Track %d", i);
+		obs_property_list_add_int(t, name, i);
+	}
+	add_split_checkbox(group, m, fader);
+
+	struct dstr text = {0}, name = {0};
+	cat_escaped(&name, m->names[fader]);
+	dstr_printf(&text, "Counts as 1 fader. Viewers get two sliders: %s · Twitch and %s · YouTube, with their own platform's at 100%% and the other at 0%%.", name.array, name.array);
+	switch (v->state.why) {
+	case FDR_SPLIT_ON:
+		break;
+	case FDR_SPLIT_PLAN:
+		dstr_cat(&text, "<br><b>Off for now:</b> it needs Pro or Partner. Your picks are kept, and the YouTube source plays in Everything else until then.");
+		break;
+	case FDR_SPLIT_NO_YOUTUBE:
+		dstr_cat(&text, "<br><b>Off for now:</b> connect YouTube to your Faders account to use this. Your picks are kept.");
+		break;
+	case FDR_SPLIT_LOCKED:
+		dstr_cat(&text, "<br><b>Off:</b> this fader isn't in your plan, so it plays in Everything else.");
+		break;
+	case FDR_SPLIT_TOO_MANY:
+		dstr_catf(&text, "<br><b>Off:</b> with a fader split per platform, the stream holds %d faders at most.", FDR_SPLIT_STEMS_MAX - 1 - FDR_SPLIT_EXTRA);
+		break;
+	default: {
+		dstr_cat(&text, "<br><b>To turn it on, pick</b> ");
+		const char *missing[3];
+		int n = 0;
+		if (!v->src.tw)
+			missing[n++] = "a Twitch source";
+		if (!v->src.yt)
+			missing[n++] = "a YouTube source";
+		if (!v->track)
+			missing[n++] = "the YouTube track";
+		for (int i = 0; i < n; i++)
+			dstr_catf(&text, "%s%s", i == 0 ? "" : i == n - 1 ? " and " : ", ", missing[i]);
+		dstr_cat(&text, ".");
+		break;
+	}
+	}
+	add_hint(group, "split_info", text.array);
+
+	// Each platform's source on its own track, and not on the other's.
+	if (v->src.tw && v->src.yt && v->track) {
+		unsigned w = fdr_split_track_warnings(obs_source_get_audio_mixers(v->src.tw), obs_source_get_audio_mixers(v->src.yt), v->stream_track, v->track);
+		fdr_uplink_status st;
+		get_status(&st);
+		if (st.split_track == v->track)
+			w |= st.split_warnings & (FDR_SPLIT_WARN_YOUTUBE_TRACK_SILENT | FDR_SPLIT_WARN_YOUTUBE_NOT_ON_TRACK);
+		dstr_copy(&text, "");
+		if (w & FDR_SPLIT_WARN_TWITCH_NOT_ON_TRACK)
+			dstr_catf(&text, "%sTwitch source isn't on Track %d.", text.len ? "<br>" : "", v->stream_track);
+		if (w & FDR_SPLIT_WARN_YOUTUBE_NOT_ON_TRACK)
+			dstr_catf(&text, "%sYouTube source isn't on Track %d.", text.len ? "<br>" : "", v->track);
+		if (w & FDR_SPLIT_WARN_TWITCH_ON_YOUTUBE_TRACK)
+			dstr_catf(&text, "%sTwitch source is also on the YouTube track: YouTube viewers will hear it twice.", text.len ? "<br>" : "");
+		if (w & FDR_SPLIT_WARN_YOUTUBE_ON_TWITCH_TRACK)
+			dstr_catf(&text, "%sYouTube source is also on the Twitch track: Twitch viewers will hear it twice.", text.len ? "<br>" : "");
+		if (w & FDR_SPLIT_WARN_YOUTUBE_TRACK_SILENT)
+			dstr_catf(&text, "%sTrack %d, the one you picked for YouTube, is silent.", text.len ? "<br>" : "", v->track);
+		if (text.len)
+			add_callout(group, "split_status", TONE_WARN, "Check the tracks per platform", text.array);
+	}
+	dstr_free(&text);
+	dstr_free(&name);
+}
+
 static void add_assignment_rows(obs_properties_t *group, obs_data_t *settings, int allowance)
 {
 	static struct dialog_model m; // large: off the stack (dialog code runs on the UI thread only)
-	build_dialog_model(&m, settings, allowance);
+	static struct split_view split;
+	split_view_get(settings, &split);
+	build_dialog_model(&m, settings, allowance, &split);
 	if (move_feedback.len) {
 		struct dstr text = {0};
 		cat_escaped(&text, move_feedback.array);
@@ -1080,6 +1378,10 @@ static void add_assignment_rows(obs_properties_t *group, obs_data_t *settings, i
 	for (int f = 0; f < m.n; f++) {
 		strncat(dialog_names, m.names[f], sizeof(dialog_names) - strlen(dialog_names) - 2);
 		strcat(dialog_names, "\n");
+		if (f == split.index) {
+			add_split_block(group, &m, f);
+			continue;
+		}
 		bool first = true;
 		for (int i = 0; i < m.n_items; i++) {
 			if (m.items[i].fader != f)
@@ -1088,6 +1390,8 @@ static void add_assignment_rows(obs_properties_t *group, obs_data_t *settings, i
 			first = false;
 		}
 		add_dialog_row(group, &m, f, NULL, first);
+		if (f < m.open)
+			add_split_checkbox(group, &m, f);
 	}
 	// What's left over, by name, so nothing is a mystery: NEW sources marked, and a source whose
 	// fader is gone says which one it was on (renaming a fader back brings it back).
@@ -1104,6 +1408,14 @@ static void add_assignment_rows(obs_properties_t *group, obs_data_t *settings, i
 			dstr_cat(&rest, " (its fader \"");
 			cat_escaped(&rest, it->saved_name);
 			dstr_cat(&rest, "\" is gone)");
+		} else if (it->role == FDR_SPLIT_ROLE_PARKED) {
+			dstr_cat(&rest, " (");
+			cat_escaped(&rest, split.fader);
+			dstr_cat(&rest, "'s YouTube source, until it's on)");
+		} else if (it->role == FDR_SPLIT_ROLE_EXTRA) {
+			dstr_cat(&rest, " (");
+			cat_escaped(&rest, split.fader);
+			dstr_cat(&rest, " takes one source per platform)");
 		}
 	}
 	if (m.unmixed.len) {
@@ -1118,6 +1430,7 @@ static void add_assignment_rows(obs_properties_t *group, obs_data_t *settings, i
 	dstr_free(&rest);
 	dstr_free(&text);
 	dstr_free(&m.unmixed);
+	split_view_free(&split);
 }
 
 static obs_properties_t *src_properties(void *data)
@@ -1233,8 +1546,65 @@ static obs_properties_t *src_properties(void *data)
 // Move a source (by uuid or, for scripts, by name) to where `value` says (placement.h), after
 // checking the destination against the faders as they are now. A refused move changes nothing;
 // *error (if given) says why, in words for the window. Main/UI thread.
+// Store a placement: the fader (NULL = NEW, "" = Everything else) and the platform tag; the mixer
+// re-reads it. Main/UI thread.
+static void store_placement(obs_source_t *s, const char *to, enum fdr_platform platform)
+{
+	set_platform(s, platform);
+	pthread_mutex_lock(&uplink_mu);
+	if (mixer) {
+		fdr_mixer_assign(mixer, s, to);
+	} else {
+		obs_data_t *priv = obs_source_get_private_settings(s);
+		if (to)
+			obs_data_set_string(priv, FDR_FADER_SETTING, to);
+		else
+			obs_data_erase(priv, FDR_FADER_SETTING);
+		obs_data_release(priv);
+	}
+	pthread_mutex_unlock(&uplink_mu);
+}
+
+// A platform pick for the split fader ("tw:<fader>" / "yt:<fader>", split.h): the source becomes
+// its Twitch (or YouTube) source; the one it had goes to Everything else.
+static bool place_split_source(obs_data_t *settings, obs_source_t *s, const char *value, struct dstr *error)
+{
+	struct fader_set f;
+	current_faders(settings, &f);
+	enum fdr_platform p = FDR_PLATFORM_ALL;
+	char fader[FDR_PLACE_NAME_MAX];
+	enum fdr_split_reject r = fdr_split_check_pick(&f.list, obs_data_get_string(settings, FDR_SPLIT_FADER_KEY), value, &p, fader, sizeof(fader));
+	if (r != FDR_SPLIT_OK || !s) {
+		if (error) {
+			dstr_printf(error, "Couldn't move \"%s\": ", s ? obs_source_get_name(s) : "?");
+			if (!s)
+				dstr_copy(error, "Couldn't move that source: it no longer exists.");
+			else if (r == FDR_SPLIT_REJECT_MISSING)
+				dstr_cat(error, "that fader isn't there any more, or isn't in your plan.");
+			else
+				dstr_cat(error, "only a fader with \"Two sources: one per platform\" takes a source per platform.");
+		}
+		fdr_log(LOG_INFO, "move of \"%s\" to %s refused: %s", s ? obs_source_get_name(s) : "?", value ? value : "(null)", fdr_split_reject_name(r));
+		return false;
+	}
+	struct split_sources had;
+	find_split_sources(fader, &had);
+	obs_source_t *before = p == FDR_PLATFORM_TWITCH ? had.tw : had.yt;
+	if (before && before != s) {
+		store_placement(before, "", FDR_PLATFORM_ALL);
+		fdr_log(LOG_INFO, "\"%s\" → Everything else (replaced as %s's %s source)", obs_source_get_name(before), fader, p == FDR_PLATFORM_TWITCH ? "Twitch" : "YouTube");
+	}
+	obs_source_release(had.tw);
+	obs_source_release(had.yt);
+	store_placement(s, fader, p);
+	fdr_log(LOG_INFO, "\"%s\" → %s (%s)", obs_source_get_name(s), fader, p == FDR_PLATFORM_TWITCH ? "Twitch" : "YouTube");
+	return true;
+}
+
 static bool place_source(obs_data_t *settings, obs_source_t *s, const char *value, struct dstr *error)
 {
+	if (fdr_split_value_decode(value, NULL, NULL, 0))
+		return place_split_source(settings, s, value, error);
 	struct fader_set f;
 	current_faders(settings, &f);
 	enum fdr_value kind;
@@ -1256,6 +1626,15 @@ static bool place_source(obs_data_t *settings, obs_source_t *s, const char *valu
 		fdr_log(LOG_INFO, "move of \"%s\" to %s refused: %s", s ? obs_source_get_name(s) : "?", value ? value : "(null)", fdr_reject_name(r));
 		return false;
 	}
+	// The split fader holds its Twitch and YouTube sources and nothing else.
+	if (kind == FDR_VALUE_FADER && fdr_split_check_move(obs_data_get_string(settings, FDR_SPLIT_FADER_KEY), name) == FDR_SPLIT_REJECT_ONLY_TWO) {
+		if (error)
+			dstr_printf(error,
+				    "Couldn't move \"%s\": \"%s\" takes one Twitch source and one YouTube source. Pick them in its Twitch source and YouTube source lists.",
+				    s ? obs_source_get_name(s) : "?", name);
+		fdr_log(LOG_INFO, "move of \"%s\" to %s refused: only two", s ? obs_source_get_name(s) : "?", value);
+		return false;
+	}
 	if (!s) {
 		if (error)
 			dstr_copy(error, "Couldn't move that source: it no longer exists.");
@@ -1264,18 +1643,7 @@ static bool place_source(obs_data_t *settings, obs_source_t *s, const char *valu
 	if (kind == FDR_VALUE_KEEP)
 		return true;
 	const char *to = kind == FDR_VALUE_FADER ? name : kind == FDR_VALUE_REST ? "" : NULL;
-	pthread_mutex_lock(&uplink_mu);
-	if (mixer) {
-		fdr_mixer_assign(mixer, s, to);
-	} else {
-		obs_data_t *priv = obs_source_get_private_settings(s);
-		if (to)
-			obs_data_set_string(priv, FDR_FADER_SETTING, to);
-		else
-			obs_data_erase(priv, FDR_FADER_SETTING);
-		obs_data_release(priv);
-	}
-	pthread_mutex_unlock(&uplink_mu);
+	store_placement(s, to, FDR_PLATFORM_ALL); // a plain move: no platform any more
 	fdr_log(LOG_INFO, "\"%s\" → %s", obs_source_get_name(s), !to ? "not placed (new)" : *to ? to : "Everything else");
 	return true;
 }
@@ -1295,6 +1663,60 @@ static bool place_item(obs_data_t *settings, const char *item, const char *value
 	return ok;
 }
 
+// "Two sources: one per platform" ticked or unticked on `fader`. Ticking is checked (split.h): its
+// one source, if any, becomes its Twitch source. Unticking keeps the Twitch source on the fader
+// and puts the YouTube source in Everything else. A refusal goes to the window's feedback line.
+static bool toggle_split(obs_data_t *settings, const char *fader, bool on)
+{
+	struct split_view v;
+	split_view_get(settings, &v);
+	struct dstr error = {0};
+	bool ok = true;
+	if (on) {
+		struct split_sources here;
+		find_split_sources(fader, &here);
+		enum fdr_split_reject r = fdr_split_check_tick(&v.acc.a, &v.faders.list, v.fader, fader, here.on_fader);
+		if (r != FDR_SPLIT_OK) {
+			ok = false;
+			dstr_printf(&error, "Couldn't give \"%s\" two sources: ", fader);
+			if (r == FDR_SPLIT_REJECT_PLAN)
+				dstr_cat(&error, "that needs Pro or Partner.");
+			else if (r == FDR_SPLIT_REJECT_YOUTUBE)
+				dstr_cat(&error, "connect YouTube to your Faders account first.");
+			else if (r == FDR_SPLIT_REJECT_OTHER)
+				dstr_catf(&error, "only one fader can do this, and \"%s\" does.", v.fader);
+			else if (r == FDR_SPLIT_REJECT_FULL)
+				dstr_catf(&error, "it has %d sources, and it would hold only one for Twitch and one for YouTube. Move the others off it first.", here.on_fader);
+			else
+				dstr_cat(&error, "it isn't in your plan.");
+			fdr_log(LOG_INFO, "split on \"%s\" refused: %s", fader, fdr_split_reject_name(r));
+		} else {
+			obs_data_set_string(settings, FDR_SPLIT_FADER_KEY, fader);
+			if (here.only) {
+				store_placement(here.only, fader, FDR_PLATFORM_TWITCH);
+				fdr_log(LOG_INFO, "\"%s\" is %s's Twitch source", obs_source_get_name(here.only), fader);
+			}
+			fdr_log(LOG_INFO, "fader \"%s\": two sources, one per platform", fader);
+		}
+		obs_source_release(here.tw);
+		obs_source_release(here.yt);
+	} else if (v.index >= 0 && !astrcmpi(v.fader, fader)) {
+		obs_data_set_string(settings, FDR_SPLIT_FADER_KEY, "");
+		if (v.src.tw)
+			store_placement(v.src.tw, v.fader, FDR_PLATFORM_ALL);
+		if (v.src.yt)
+			store_placement(v.src.yt, "", FDR_PLATFORM_ALL);
+		fdr_log(LOG_INFO, "fader \"%s\": one source list again", fader);
+	}
+	split_view_free(&v);
+	if (ok)
+		dstr_free(&move_feedback);
+	else
+		dstr_move(&move_feedback, &error);
+	dstr_free(&error);
+	return ok;
+}
+
 // The dropdowns the streamer changed since the dialog was built. Returns whether any did.
 static bool apply_dialog_changes(obs_data_t *settings)
 {
@@ -1303,7 +1725,29 @@ static bool apply_dialog_changes(obs_data_t *settings)
 		struct dialog_row *row = &dialog_rows[i];
 		if (!obs_data_has_user_value(settings, row->key))
 			continue;
+		if (row->kind == ROW_SPLIT) {
+			bool now = obs_data_get_bool(settings, row->key);
+			if (now == (row->item[0] == '1'))
+				continue;
+			changed = true;
+			toggle_split(settings, row->fader, now);
+			continue;
+		}
 		const char *now = obs_data_get_string(settings, row->key);
+		if (row->kind == ROW_TWITCH || row->kind == ROW_YOUTUBE) {
+			if (strcmp(now, row->item) == 0)
+				continue;
+			if (!strcmp(now, CHOICE_NONE) && *row->item) {
+				changed = true;
+				place_item(settings, row->item, "x:rest");
+			} else if (!strncmp(now, ITEM_SRC, strlen(ITEM_SRC))) {
+				changed = true;
+				char value[FDR_STEM_NAME_MAX + 8];
+				fdr_split_value_encode(row->kind == ROW_TWITCH ? FDR_PLATFORM_TWITCH : FDR_PLATFORM_YOUTUBE, row->fader, value, sizeof(value));
+				place_item(settings, now, value);
+			}
+			continue;
+		}
 		if (strcmp(now, row->item) == 0)
 			continue;
 		// An existing row offers only "Remove"; an Add row only sources. Anything else is not a
@@ -1345,7 +1789,7 @@ static bool rename_source(void *param, obs_source_t *s)
 
 // A fader renamed in place (same position, same number of faders, the old name gone and the new
 // one new) keeps what was on it: sources are stored by fader name, so they follow.
-static void follow_renames(const char names[][FDR_STEM_NAME_MAX], int n)
+static void follow_renames(obs_data_t *settings, const char names[][FDR_STEM_NAME_MAX], int n)
 {
 	if (n_last_names == n) {
 		for (int i = 0; i < n; i++) {
@@ -1358,6 +1802,8 @@ static void follow_renames(const char names[][FDR_STEM_NAME_MAX], int n)
 				continue; // a swap or a reorder, not a rename
 			struct rename r = {last_names[i], names[i]};
 			obs_enum_sources(rename_source, &r);
+			if (!astrcmpi(obs_data_get_string(settings, FDR_SPLIT_FADER_KEY), r.from))
+				obs_data_set_string(settings, FDR_SPLIT_FADER_KEY, r.to); // still the split fader
 			fdr_log(LOG_INFO, "fader \"%s\" renamed to \"%s\": its sources follow", r.from, r.to);
 		}
 	}
@@ -1373,13 +1819,18 @@ static void src_update(void *data, obs_data_t *settings)
 	// Renaming, adding or removing a fader changes the rows too.
 	char names[FDR_MAX_FADERS][FDR_STEM_NAME_MAX];
 	int n = fader_names(settings, names, FDR_MAX_FADERS);
-	follow_renames(names, n);
+	follow_renames(settings, names, n);
 	char joined[sizeof(dialog_names)] = "";
 	for (int i = 0; i < n; i++) {
 		strncat(joined, names[i], sizeof(joined) - strlen(joined) - 2);
 		strcat(joined, "\n");
 	}
 	bool renamed = n_dialog_rows > 0 && strcmp(joined, dialog_names) != 0;
+	// The YouTube track changes what the split fader's block says.
+	static long long last_split_track = -1;
+	long long split_track = obs_data_get_int(settings, FDR_SPLIT_TRACK_KEY);
+	bool split_changed = last_split_track >= 0 && split_track != last_split_track;
+	last_split_track = split_track;
 	save_settings(settings);
 	// A change of names or placements while running doesn't need a restart.
 	pthread_mutex_lock(&uplink_mu);
@@ -1392,7 +1843,7 @@ static void src_update(void *data, obs_data_t *settings)
 		apply(settings);
 	// An open dialog redraws with the new rows, once OBS has finished handling the change (see
 	// redraw_wanted: never from in here).
-	if (reassigned || renamed)
+	if (reassigned || renamed || split_changed)
 		os_atomic_set_bool(&redraw_wanted, true);
 }
 
@@ -1522,9 +1973,11 @@ static void on_frontend_event(enum obs_frontend_event event, void *unused)
 // faders_assign(source, fader → ok, error): fader name, "" = Everything else. Checked like a pick.
 // faders_place(source, value → ok, error): a placement value (placement.h): "f:<fader>", "x:rest",
 //   "x:new" (back to not placed), "x:keep".
-// faders_placement(source → saved, effective, state): saved = "new" / "rest" / the fader's name;
-//   effective = the fader it plays on ("" = Everything else); state = "new", "rest", "ok",
-//   "locked", "deleted" or "dropped".
+// faders_placement(source → saved, effective, state, platform): saved = "new" / "rest" / the
+//   fader's name; effective = the fader it plays on ("" = Everything else); state = "new", "rest",
+//   "ok", "locked", "deleted", "dropped", or on the split fader "parked" (its YouTube source while
+//   the split is off) or "extra" (anything else saved on it); platform = "twitch", "youtube", "".
+// faders_place also takes "tw:<fader>" / "yt:<fader>": the split fader's Twitch / YouTube source.
 // faders_watch_stream_track(track) · faders_status(out status) · faders_mixer_stats(out json)
 
 static void proc_watch_stream_track(void *data, calldata_t *cd)
@@ -1601,9 +2054,23 @@ static void proc_placement(void *unused, calldata_t *cd)
 	enum fdr_state state = FDR_STATE_NEW;
 	char name[FDR_STEM_NAME_MAX] = "";
 	int idx = src ? effective_placement(&f, src, &saved, name, &state) : -1;
+	// On the split fader: the YouTube source while it's off ("parked") and anything else saved on
+	// it ("extra") play in Everything else (split.h).
+	const char *state_name = fdr_state_name(state);
+	if (src && state == FDR_STATE_ON_FADER) {
+		struct split_view v;
+		split_view_get(settings, &v);
+		enum fdr_split_role role = split_role_of(&v, src);
+		if (role == FDR_SPLIT_ROLE_PARKED || role == FDR_SPLIT_ROLE_EXTRA) {
+			idx = -1;
+			state_name = fdr_split_role_name(role);
+		}
+		split_view_free(&v);
+	}
 	calldata_set_string(cd, "saved", saved == FDR_SAVED_NEW ? "new" : saved == FDR_SAVED_REST ? "rest" : name);
 	calldata_set_string(cd, "effective", idx >= 0 ? f.names[idx] : "");
-	calldata_set_string(cd, "state", fdr_state_name(state));
+	calldata_set_string(cd, "state", state_name);
+	calldata_set_string(cd, "platform", src ? fdr_platform_name(platform_of(src)) : "");
 	obs_data_release(settings);
 	obs_source_release(src);
 }
@@ -1634,6 +2101,10 @@ static void proc_dialog(void *unused, calldata_t *cd)
 	obs_property_t *group = obs_properties_get(props, "sources_group");
 	for (obs_property_t *p = group ? obs_properties_first(obs_property_group_content(group)) : NULL; p; obs_property_next(&p)) {
 		const char *key = obs_property_name(p);
+		if (obs_property_get_type(p) == OBS_PROPERTY_BOOL) { // key<TAB>[x] label (disabled)
+			dstr_catf(&out, "%s\t%s %s%s\n", key, obs_data_get_bool(settings, key) ? "[x]" : "[ ]", obs_property_description(p), obs_property_enabled(p) ? "" : " (disabled)");
+			continue;
+		}
 		if (obs_property_get_type(p) != OBS_PROPERTY_LIST) {
 			dstr_catf(&out, "%s\t", key);
 			strip_tags(obs_property_description(p), &out);
@@ -1641,10 +2112,11 @@ static void proc_dialog(void *unused, calldata_t *cd)
 			continue;
 		}
 		const char *value = obs_data_get_string(settings, key);
+		bool ints = obs_property_list_format(p) == OBS_COMBO_FORMAT_INT;
 		const char *shown = "";
 		struct dstr choices = {0};
 		for (size_t i = 0; i < obs_property_list_item_count(p); i++) {
-			if (strcmp(obs_property_list_item_string(p, i), value) == 0)
+			if (ints ? obs_property_list_item_int(p, i) == obs_data_get_int(settings, key) : strcmp(obs_property_list_item_string(p, i), value) == 0)
 				shown = obs_property_list_item_name(p, i);
 			dstr_catf(&choices, "%s%s", i ? "|" : "", obs_property_list_item_name(p, i));
 		}
@@ -1665,11 +2137,18 @@ static void proc_dialog_set(void *unused, calldata_t *cd)
 	obs_properties_t *props = obs_source_properties(settings_source);
 	obs_property_t *p = obs_properties_get(props, key);
 	obs_data_t *change = NULL;
-	for (size_t i = 0; p && want && i < obs_property_list_item_count(p) && !change; i++) {
+	if (p && want && obs_property_get_type(p) == OBS_PROPERTY_BOOL) { // choice: "on" / "off"
+		change = obs_data_create();
+		obs_data_set_bool(change, key, !strcmp(want, "on"));
+	}
+	for (size_t i = 0; p && want && obs_property_get_type(p) == OBS_PROPERTY_LIST && i < obs_property_list_item_count(p) && !change; i++) {
 		if (strncmp(obs_property_list_item_name(p, i), want, strlen(want)) != 0)
 			continue;
 		change = obs_data_create();
-		obs_data_set_string(change, key, obs_property_list_item_string(p, i));
+		if (obs_property_list_format(p) == OBS_COMBO_FORMAT_INT)
+			obs_data_set_int(change, key, obs_property_list_item_int(p, i));
+		else
+			obs_data_set_string(change, key, obs_property_list_item_string(p, i));
 	}
 	obs_properties_destroy(props);
 	long before = os_atomic_load_long(&dialog_redraws);
@@ -1702,6 +2181,17 @@ static void proc_mixer_stats(void *unused, calldata_t *cd)
 	struct dstr json = {0};
 	pthread_mutex_lock(&uplink_mu);
 	fdr_mixer_stats_json(mixer, &json);
+	pthread_mutex_unlock(&uplink_mu);
+	calldata_set_string(cd, "json", json.array);
+	dstr_free(&json);
+}
+
+static void proc_split_stats(void *unused, calldata_t *cd)
+{
+	UNUSED_PARAMETER(unused);
+	struct dstr json = {0};
+	pthread_mutex_lock(&uplink_mu);
+	fdr_splitmix_stats_json(fdr_mixer_split(mixer), &json);
 	pthread_mutex_unlock(&uplink_mu);
 	calldata_set_string(cd, "json", json.array);
 	dstr_free(&json);
@@ -1961,7 +2451,7 @@ bool obs_module_load(void)
 	proc_handler_add(ph, "void faders_configure(in string server, in string key, in string faders, in bool only_live)", proc_configure, NULL);
 	proc_handler_add(ph, "void faders_assign(in string source, in string fader, out bool ok, out string error)", proc_assign, NULL);
 	proc_handler_add(ph, "void faders_place(in string source, in string value, out bool ok, out string error)", proc_place, NULL);
-	proc_handler_add(ph, "void faders_placement(in string source, out string saved, out string effective, out string state)", proc_placement, NULL);
+	proc_handler_add(ph, "void faders_placement(in string source, out string saved, out string effective, out string state, out string platform)", proc_placement, NULL);
 	proc_handler_add(ph, "void faders_frontend_event(in int event)", proc_frontend_event, NULL);
 	proc_handler_add(ph, "void faders_dialog_opens(out int n)", proc_dialog_opens, NULL);
 	proc_handler_add(ph, "void faders_debug_report(in bool names, out bool ok, out string report, out string error)", proc_debug_report, NULL);
@@ -1970,6 +2460,7 @@ bool obs_module_load(void)
 	proc_handler_add(ph, "void faders_dialog_set(in string key, in string choice, out bool ok, out int redraws_during_update)", proc_dialog_set, NULL);
 	proc_handler_add(ph, "void faders_dialog_redraws(out int n)", proc_dialog_redraws, NULL);
 	proc_handler_add(ph, "void faders_mixer_stats(out string json)", proc_mixer_stats, NULL);
+	proc_handler_add(ph, "void faders_split_stats(out string json)", proc_split_stats, NULL);
 	proc_handler_add(ph, "void faders_rebuild()", proc_rebuild, NULL);
 	proc_handler_add(ph, "void faders_transition_duration(in int ms)", proc_transition_duration, NULL);
 

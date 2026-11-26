@@ -9,6 +9,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "uplink.h"
+#include "split.h"
 #include "ws.h"
 #include "logring.h"
 
@@ -75,6 +76,11 @@ struct fdr_uplink {
 	int n_stems; // stems on the wire, as the mixer set them (0 until it does)
 	char names[MAX_STEMS][FDR_STEM_NAME_MAX];
 	bool rest_last; // the last stem is "Everything else"
+	// The split fader (PROTOCOL-SPLIT.md §2): each stem's platform, the split group's id, and how
+	// many "Everything else" stems end the list (2 while split: Twitch's, then YouTube's).
+	enum fdr_platform platforms[MAX_STEMS];
+	char fader_ids[MAX_STEMS][8];
+	int n_rest;
 
 	OpusEncoder *enc[MAX_STEMS];
 	int bitrate;      // what the encoders use (worker thread only)
@@ -187,7 +193,7 @@ void fdr_uplink_push_tick(fdr_uplink_t *u, uint64_t ts, const float *const *stem
 		if (u->watching_stream) {
 			if (track_peak > STREAM_SOUND_PEAK)
 				u->stream_heard_ns = os_gettime_ns();
-			for (int s = 0; s < n - (u->rest_last ? 1 : 0); s++)
+			for (int s = 0; s < n - u->n_rest; s++)
 				if (peak_of(stems[s], frames * CHANNELS) > STEM_SOUND_PEAK) {
 					u->stems_heard_ns = os_gettime_ns();
 					break;
@@ -241,6 +247,11 @@ static void send_status(struct fdr_uplink *u, uint64_t now)
 		}
 		dstr_cat(&msg, "\"");
 	}
+	if (send && u->status.split_track > 0) {
+		char split[256];
+		if (fdr_split_status_json(split, sizeof(split), u->status.split_track, u->status.split_warnings))
+			dstr_cat(&msg, split);
+	}
 	if (send)
 		dstr_cat(&msg, "}");
 	pthread_mutex_unlock(&u->mu);
@@ -263,30 +274,22 @@ static void send_stems(struct fdr_uplink *u)
 	bool send = u->stems_dirty && u->ws && u->connected;
 	int n = u->n_stems;
 	uint32_t gen = u->layout_gen;
-	bool rest_last = u->rest_last;
-	char names[MAX_STEMS][FDR_STEM_NAME_MAX];
+	struct fdr_stem_desc stems[MAX_STEMS];
+	char names[MAX_STEMS][FDR_STEM_NAME_MAX], ids[MAX_STEMS][8];
 	memcpy(names, u->names, sizeof(names));
+	memcpy(ids, u->fader_ids, sizeof(ids));
+	for (int s = 0; s < n; s++)
+		stems[s] = (struct fdr_stem_desc){names[s], s >= n - u->n_rest, ids[s][0] ? ids[s] : NULL, u->platforms[s]};
 	pthread_mutex_unlock(&u->mu);
 	if (!send || n < 1)
 		return;
+	// Without a split this is exactly the message from before it (test/split/stems-off.json).
+	char text[MAX_STEMS * (FDR_STEM_NAME_MAX * 2 + 96) + 64];
 	struct dstr msg = {0};
-	dstr_copy(&msg, "{\"type\":\"stems\",\"stems\":[");
-	for (int s = 0; s < n; s++) {
-		if (rest_last && s == n - 1) {
-			dstr_catf(&msg, "%s{\"id\":%d,\"name\":\"Everything else\",\"rest\":true}", s ? "," : "", s);
-			continue;
-		}
-		const char *name = names[s];
-		dstr_catf(&msg, "%s{\"id\":%d,\"name\":\"", s ? "," : "", s);
-		for (const char *c = name; *c; c++) { // JSON string: escape quotes and backslashes, drop controls
-			if (*c == '"' || *c == '\\')
-				dstr_catf(&msg, "\\%c", *c);
-			else if ((unsigned char)*c >= 0x20)
-				dstr_ncat(&msg, c, 1);
-		}
-		dstr_cat(&msg, "\"}");
-	}
-	dstr_cat(&msg, "]}");
+	if (fdr_stems_json(text, sizeof(text), stems, n))
+		dstr_copy(&msg, text);
+	else
+		return;
 	bool ok = fdr_ws_send_text(u->ws, msg.array);
 	dstr_free(&msg);
 	if (ok) {
@@ -633,12 +636,28 @@ fdr_uplink_t *fdr_uplink_start(const fdr_uplink_config *cfg)
 
 void fdr_uplink_set_stems(fdr_uplink_t *u, const char *const *names, int n, bool rest)
 {
+	struct fdr_stem_desc stems[MAX_STEMS];
+	if (n > MAX_STEMS)
+		n = MAX_STEMS;
+	for (int s = 0; s < n; s++)
+		stems[s] = (struct fdr_stem_desc){names[s], rest && s == n - 1, NULL, FDR_PLATFORM_ALL};
+	fdr_uplink_set_layout(u, stems, n);
+}
+
+void fdr_uplink_set_layout(fdr_uplink_t *u, const struct fdr_stem_desc *stems, int n)
+{
 	if (!u)
 		return;
 	if (n < 1)
 		n = 1;
 	if (n > MAX_STEMS)
 		n = MAX_STEMS;
+	// "Everything else" stems end the list: one, or two while split.
+	int n_rest = 0;
+	while (n_rest < n && stems[n - 1 - n_rest].rest)
+		n_rest++;
+	bool rest = n_rest > 0;
+	bool split = false;
 	// Rings and encoders for new indices are made before the count grows, so the worker never
 	// sees an index it has no encoder for. They stay for the life of the uplink.
 	struct ring *new_rings[MAX_STEMS] = {0};
@@ -650,28 +669,51 @@ void fdr_uplink_set_stems(fdr_uplink_t *u, const char *const *names, int n, bool
 			new_enc[s] = make_encoder(u->bitrate);
 	}
 	pthread_mutex_lock(&u->mu);
-	bool changed = n != u->n_stems || rest != u->rest_last;
+	bool changed = n != u->n_stems || rest != u->rest_last || n_rest != u->n_rest;
 	for (int s = 0; s < n; s++) {
 		if (new_rings[s])
 			u->rings[s] = new_rings[s];
 		if (new_enc[s])
 			u->enc[s] = new_enc[s];
-		char name[FDR_STEM_NAME_MAX];
-		snprintf(name, sizeof(name), "%s", names[s] ? names[s] : "");
-		changed = changed || strcmp(u->names[s], name) != 0;
+		char name[FDR_STEM_NAME_MAX], id[8];
+		snprintf(name, sizeof(name), "%s", stems[s].name ? stems[s].name : "");
+		snprintf(id, sizeof(id), "%s", stems[s].fader ? stems[s].fader : "");
+		changed = changed || strcmp(u->names[s], name) != 0 || strcmp(u->fader_ids[s], id) != 0 || u->platforms[s] != stems[s].platform;
 		memcpy(u->names[s], name, sizeof(name));
+		memcpy(u->fader_ids[s], id, sizeof(id));
+		u->platforms[s] = stems[s].platform;
+		split = split || id[0];
 	}
 	if (changed) {
 		// The same list again (any settings change re-applies it) leaves the audio alone.
 		u->n_stems = n;
 		u->rest_last = rest;
+		u->n_rest = n_rest;
 		u->status.stems = n;
+		u->status.split = split;
 		u->stems_dirty = true;
 		reset_rings(u); // a chunk has one layout: restart aligned (and a new layout generation)
 	}
 	pthread_mutex_unlock(&u->mu);
 	if (changed)
-		fdr_log(LOG_INFO, "stems: %d layer(s)%s", n, rest ? " incl. Everything else" : "");
+		fdr_log(LOG_INFO, "stems: %d layer(s)%s%s", n, rest ? " incl. Everything else" : "", split ? ", one fader split per platform" : "");
+}
+
+void fdr_uplink_set_split_status(fdr_uplink_t *u, int youtube_track, unsigned warnings)
+{
+	if (!u)
+		return;
+	pthread_mutex_lock(&u->mu);
+	if (youtube_track < 0 || youtube_track > 6)
+		youtube_track = 0;
+	if (!youtube_track)
+		warnings = 0;
+	if (u->status.split_track != youtube_track || u->status.split_warnings != warnings) {
+		u->status.split_track = youtube_track;
+		u->status.split_warnings = warnings;
+		u->stream_status_dirty = true;
+	}
+	pthread_mutex_unlock(&u->mu);
 }
 
 void fdr_uplink_set_mismatch(fdr_uplink_t *u, const char *source_name)

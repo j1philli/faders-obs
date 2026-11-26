@@ -20,7 +20,7 @@ set(GEN "${CMAKE_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${GEN}")
 file(WRITE "${GEN}/obsconfig.h" "#pragma once\n#define OBS_RELEASE_CANDIDATE 0\n#define OBS_BETA 0\n")
 
-set(FADERS_SOURCES src/plugin-main.c src/uplink.c src/mixer.c src/placement.c src/logring.c src/redact.c src/report.c src/sysinfo.c)
+set(FADERS_SOURCES src/plugin-main.c src/uplink.c src/mixer.c src/placement.c src/split.c src/splitmix.c src/logring.c src/redact.c src/report.c src/sysinfo.c)
 set(OBS_INCLUDES "${GEN}" "${OBS_SRC}/libobs" "${OBS_SRC}/frontend/api" "${SIMDE_INCLUDE}")
 
 if(APPLE)

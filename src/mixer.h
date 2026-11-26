@@ -22,6 +22,7 @@
 #include <obs.h>
 #include <util/dstr.h>
 #include "uplink.h"
+#include "splitmix.h"
 
 typedef struct fdr_mixer fdr_mixer_t;
 
@@ -61,6 +62,10 @@ bool fdr_mixer_is_dropped(fdr_mixer_t *m, obs_source_t *src);
 // Set a source's saved placement (fader name, "" for Everything else, NULL for NEW) and rebuild.
 // Unchecked: callers check the move first (fdr_place_check).
 void fdr_mixer_assign(fdr_mixer_t *m, obs_source_t *src, const char *fader);
+
+// The split fader's side of the mixer (splitmix.h): configure it with fdr_splitmix_set, then
+// fdr_mixer_rebuild (fdr_mixer_set_faders rebuilds too).
+fdr_splitmix_t *fdr_mixer_split(fdr_mixer_t *m);
 
 // Test hook: JSON with the window's residual/fader levels, callback timing and gate decisions;
 // resets the window.
